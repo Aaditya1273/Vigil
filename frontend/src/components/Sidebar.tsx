@@ -5,6 +5,7 @@ import { usePathname } from 'next/navigation'
 import {
   LayoutDashboard, Activity, BarChart3, AlertTriangle,
   Shield, FileCheck, Zap, Cpu, CalendarClock, Settings, HelpCircle,
+  Network, GitBranch, History,
 } from 'lucide-react'
 
 const menuItems = [
@@ -16,6 +17,9 @@ const menuItems = [
   { label: 'Governance',      href: '/governance',       icon: FileCheck },
   { label: 'Model Router',    href: '/models',           icon: Cpu },
   { label: 'Plugins',         href: '/plugins',          icon: Zap },
+  { label: 'Ontology',        href: '/ontology',         icon: Network },
+  { label: 'Blast Radius',    href: '/blast-radius',     icon: GitBranch },
+  { label: 'Memory Timeline', href: '/memory-timeline',  icon: History },
 ]
 
 import { useSession, signOut } from 'next-auth/react'

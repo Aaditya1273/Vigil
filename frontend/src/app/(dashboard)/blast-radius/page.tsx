@@ -108,7 +108,7 @@ export default function BlastRadiusPage() {
             </div>
             <div className="stat-card">
               <p className="text-[11px] text-gray-500 font-medium uppercase tracking-wider">
-                Query time <span title="Real measured latency across all 3 queries, not a target number.">ⓘ</span>
+                Query time <span title="Real measured latency across all 3 graph_context=true queries. Plain memory retrieval (no graph context) runs closer to 200-250ms; graph-enriched structural queries like this one cost more.">ⓘ</span>
               </p>
               <p className="text-xl font-bold mt-1 text-gray-900">{Math.round(result.blast_radius_time_ms)}ms</p>
             </div>

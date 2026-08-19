@@ -327,11 +327,18 @@ against a real key settled it):
   (`sam --[also known as]--> soham ratnaparkhi`), a contradictory
   document pair, and both trust-scored sources — extracted automatically
   from plain-English seed text, not hand-built graph structure.
-- **Honest number, not the target one:** HydraDB's `mode=thinking,
-  graph_context=true` query measured 150ms–2.5s per call in isolation,
-  up to ~4s under concurrent load in practice. That is the real number
-  the `/blast-radius` page reports; it is not sub-200ms, and this
-  document says so rather than rounding down.
+- **Honest numbers, broken out by query shape, not one rounded-down
+  average:** `mode=thinking` (the default this client used until it was
+  switched) measured 2.5–5s per call — a deeper reasoning pass, paid on
+  every query whether or not the question needed it. `mode=fast` with
+  `graph_context=true` (what blast-radius/maintainer/typosquat use)
+  measured 375ms–1s isolated, up to ~4–5s under concurrent load. Plain
+  memory retrieval — `mode=fast`, `graph_context=false` — measured
+  **~220–260ms**, genuinely close to HydraDB's own published "sub-200ms
+  retrieval" claim, which is evidently made for that query shape, not
+  the graph-context-enriched structural queries this integration relies
+  on for blast radius. Different question, different cost; reporting
+  both rather than letting one stand in for the other.
 
 ---
 

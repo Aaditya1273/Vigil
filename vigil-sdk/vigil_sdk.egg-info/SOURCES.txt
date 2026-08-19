@@ -1,0 +1,16 @@
+README.md
+pyproject.toml
+tests/test_instrumentation.py
+vigil/__init__.py
+vigil/_version.py
+vigil/client.py
+vigil/config.py
+vigil/instrumentation.py
+vigil/interceptors.py
+vigil/state.py
+vigil/transport.py
+vigil_sdk.egg-info/PKG-INFO
+vigil_sdk.egg-info/SOURCES.txt
+vigil_sdk.egg-info/dependency_links.txt
+vigil_sdk.egg-info/requires.txt
+vigil_sdk.egg-info/top_level.txt

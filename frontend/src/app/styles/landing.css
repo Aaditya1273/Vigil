@@ -1,0 +1,32 @@
+/* ─────────────────────────────────────────────────────────────────────────────
+   landing.css — entry point for the landing page only.
+
+   Imported from app/page.tsx rather than globals.css on purpose: these files
+   ship their own @font-face rules, a full `*` reset, and body-level styling.
+   Loading them globally would restyle every dashboard route.
+───────────────────────────────────────────────────────────────────────────── */
+
+@import './base.css';
+/* Fonts, Vigil design tokens, reset, body/html      */
+@import './navbar.css';
+/* Navbar, wordmark, pop-out panels                  */
+@import './hero.css';
+/* Section title + underline SVG                     */
+@import './motion-cards.css';
+/* Motion card section (heading + cards + text)      */
+@import './showreel.css';
+/* Showreel placeholder                              */
+@import './cards.css';
+/* Service cards, stickers                           */
+@import './marquee.css';
+/* Double marquee + wordmark tiles                   */
+@import './footer.css';
+/* Footer layout, credits, stickers                  */
+@import './vimeo-hero.css';
+/* Hero video, headline, controls                    */
+@import './cursor.css';
+/* Cursor bubble + transition scribble overlay       */
+@import './horizontal-words.css';
+/* Pinned horizontal sentence                        */
+@import './responsive.css';
+/* All media queries (tablet + mobile)               */

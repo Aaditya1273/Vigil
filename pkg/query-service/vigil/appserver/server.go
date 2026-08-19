@@ -1,0 +1,975 @@
+package appserver
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"log/slog"
+	"net/http"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/SigNoz/signoz/pkg/alertmanager"
+	"github.com/SigNoz/signoz/pkg/query-service/interfaces"
+	"github.com/SigNoz/signoz/pkg/query-service/vigil"
+	"github.com/SigNoz/signoz/pkg/query-service/vigil/alerts"
+	"github.com/SigNoz/signoz/pkg/query-service/vigil/cost"
+	"github.com/SigNoz/signoz/pkg/query-service/vigil/dashboards"
+	"github.com/SigNoz/signoz/pkg/query-service/vigil/dna"
+	"github.com/SigNoz/signoz/pkg/query-service/vigil/engine"
+	"github.com/SigNoz/signoz/pkg/query-service/vigil/integration"
+	"github.com/SigNoz/signoz/pkg/query-service/vigil/investigation"
+	"github.com/SigNoz/signoz/pkg/query-service/vigil/mcp"
+	vigilOAuth "github.com/SigNoz/signoz/pkg/query-service/vigil/oauth"
+	"github.com/SigNoz/signoz/pkg/query-service/vigil/policy"
+	"github.com/SigNoz/signoz/pkg/query-service/vigil/replay"
+	"github.com/SigNoz/signoz/pkg/query-service/vigil/state"
+	"github.com/SigNoz/signoz/pkg/query-service/vigil/telemetry"
+	"github.com/SigNoz/signoz/pkg/telemetrystore"
+	"github.com/gorilla/mux"
+)
+
+// NewServer creates an ARGUS HTTP server backed by SigNoz services.
+//
+// Parameters:
+//   - addr: listen address (e.g. ":8080")
+//   - telemetryStore: SigNoz TelemetryStore for ClickHouse-backed trace/metric/log data (nil = in-memory fallback)
+//   - reader: SigNoz Reader for service list, trace search, and service metrics (nil = limited functionality)
+//   - am: SigNoz Alertmanager for alert rule CRUD and notification channels (nil = alert endpoints unavailable)
+//   - orgID: SigNoz organization ID for scoping alerts and dashboards
+//   - signozEndpoint: SigNoz Cloud OTLP endpoint (e.g. https://ingest.in2.signoz.cloud). Empty if not configured.
+//   - signozIngestionKey: SigNoz Cloud ingestion key. Empty if not configured.
+//
+// When reader is provided, dashboard builder and investigation use real SigNoz trace/service data.
+// When alertmanager is provided, alerts can be pushed to SigNoz and notification channels listed.
+// When signozEndpoint and signozIngestionKey are provided, SigNoz Cloud connectivity checks and
+// OTel config generation endpoints are enabled.
+func NewServer(addr string, telemetryStore telemetrystore.TelemetryStore, reader interfaces.Reader, am alertmanager.Alertmanager, orgID string, signozEndpoint string, signozIngestionKey string) *http.Server {
+	logger := slog.Default()
+
+	// --- Core Engines ---
+	budgetLimit := 100.0
+	if v := vigil.Env("BUDGET_LIMIT"); v != "" {
+		if parsed, err := strconv.ParseFloat(v, 64); err == nil {
+			budgetLimit = parsed
+		}
+	}
+	costFirewall := vigil.NewCostFirewall(budgetLimit)
+	costTracker := cost.NewCostTracker()
+	policyEngine := cost.NewPolicyEngine(logger, costTracker)
+	dnaDetector := dna.NewAnomalyDetector()
+
+	// burnHistory records the actual cost firewall burn value at each 5-minute mark.
+	// This gives the chart real monotonic data instead of fake linear growth.
+	const burnHistoryLen = 25
+	burnHistory := make([]float64, burnHistoryLen)
+	burnLabels := make([]string, burnHistoryLen)
+	burnMu := &sync.Mutex{}
+
+	// Pre-fill labels for the last 25 × 5-minute windows
+	now0 := time.Now()
+	for i := 0; i < burnHistoryLen; i++ {
+		t := now0.Add(time.Duration(-(burnHistoryLen-1-i)*5) * time.Minute)
+		burnLabels[i] = t.Format("15:04")
+		burnHistory[i] = 0
+	}
+
+	// Tick every 5 minutes: shift the window and record the real current burn
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			burnMu.Lock()
+			copy(burnHistory[:burnHistoryLen-1], burnHistory[1:])
+			burnHistory[burnHistoryLen-1] = costFirewall.Burn()
+			copy(burnLabels[:burnHistoryLen-1], burnLabels[1:])
+			burnLabels[burnHistoryLen-1] = time.Now().Format("15:04")
+			burnMu.Unlock()
+		}
+	}()
+
+	// --- Trace Store (ClickHouse-backed when available) ---
+	var traceStore replay.TraceStore
+	var dnaBaselineProvider *dna.ClickHouseBaselineProvider
+	var costProvider *cost.ClickHouseCostProvider
+
+	// Initialize SigNoz-integrated services (safe with nil dependencies - upgrades to real when dependencies provided)
+	dashBuilder := dashboards.NewDashboardBuilder(logger, reader, telemetryStore)
+	invest := investigation.NewViolationInvestigator(logger, reader, telemetryStore)
+
+	// AlertManager integration - requires both an Alertmanager instance and orgID
+	var alertManager *alerts.ARGUSRuleManager
+	if am != nil && orgID != "" {
+		alertManager = alerts.NewARGUSRuleManager(logger, am, orgID)
+		logger.InfoContext(context.Background(), "argus: alertmanager integration initialized",
+			slog.String("org_id", orgID),
+		)
+	}
+
+	hasClickHouse := telemetryStore != nil && telemetryStore.ClickhouseDB() != nil
+
+	if hasClickHouse {
+		// Real SigNoz-backed implementations
+		traceStore = replay.NewClickHouseTraceStore(logger, telemetryStore)
+		dnaBaselineProvider = dna.NewClickHouseBaselineProvider(logger, telemetryStore, dnaDetector)
+		costProvider = cost.NewClickHouseCostProvider(logger, telemetryStore, costTracker)
+
+		if err := costProvider.SyncPricingFromClickHouse(context.Background()); err != nil {
+			logger.WarnContext(context.Background(), "argus: failed to sync pricing from clickhouse, using defaults",
+				slog.String("error", err.Error()),
+			)
+		}
+
+		if baseline, err := dnaBaselineProvider.BuildBaselineFromTraces(context.Background(), "", 7*24*time.Hour); err != nil {
+			logger.WarnContext(context.Background(), "argus: failed to build dna baseline from clickhouse",
+				slog.String("error", err.Error()),
+			)
+		} else if baseline != nil {
+			logger.InfoContext(context.Background(), "argus: built dna baseline from real clickhouse data",
+				slog.Float64("mean_latency_ms", baseline.MeanLatencyMs),
+				slog.Int("expected_tools", len(baseline.ExpectedTools)),
+			)
+		}
+	} else {
+		traceStore = replay.NewMemoryTraceStore()
+		logger.WarnContext(context.Background(), "argus: no telemetry store provided, using in-memory fallback")
+	}
+
+	llmClient := replay.NewLLMClient()
+	replayEngine := replay.NewReplayEngine(traceStore, llmClient)
+	differ := replay.NewDiffer()
+
+	wsHub := state.GetHub()
+	agentTracker := state.GetTracker(wsHub)
+	agentHub := state.GetAgentHub()
+
+	// --- OAuth 2.1 AS store (Claude Web real connections) ---
+	oauthStore := vigilOAuth.NewStore()
+	// onTokenMinted is set after mcpServer is created (needs mcpServer reference)
+	var onTokenMinted func(sessionID string, budget float64, clientName string)
+
+	r := mux.NewRouter()
+
+	// --- CORS middleware (allows Next.js frontend on any port to call the backend) ---
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-MCP-Session-ID")
+			if req.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			next.ServeHTTP(w, req)
+		})
+	})
+
+	api := r.PathPrefix("/api/v1").Subrouter()
+
+	// --- Health ---
+	api.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status":"ok","service":"vigil"}`))
+	}).Methods("GET", "OPTIONS")
+
+	// --- Aggregated Stats (unified — used by Mission Control AND Cost Firewall pages) ---
+	api.HandleFunc("/vigil/stats", func(w http.ResponseWriter, r *http.Request) {
+		allAgents := agentTracker.GetAllAgents()
+		var totalAgents, healthy, blockedCount, activeIncidents int
+		for _, a := range allAgents {
+			totalAgents++
+			switch a.Status {
+			case state.StatusRunning:
+				healthy++
+			case state.StatusBlocked:
+				blockedCount++
+				activeIncidents++
+			case state.StatusDead:
+				activeIncidents++
+			}
+		}
+
+		// Build policy list for Cost Firewall dashboard
+		policies := policyEngine.GetPolicies()
+		activePolicies := make([]map[string]string, 0, len(policies))
+		for _, p := range policies {
+			limitStr := strconv.FormatFloat(p.Condition.Threshold, 'f', 2, 64)
+			activePolicies = append(activePolicies, map[string]string{
+				"name":   p.Name,
+				"limit":  "$" + limitStr,
+				"action": string(p.Action),
+				"status": "Active",
+			})
+		}
+
+		// Build cost chart from real burnHistory (updated every 5 minutes by the background ticker).
+		// The last slot always reflects the current live burn.
+		burnMu.Lock()
+		data := make([]float64, burnHistoryLen)
+		labels := make([]string, burnHistoryLen)
+		copy(data, burnHistory)
+		copy(labels, burnLabels)
+		data[burnHistoryLen-1] = costFirewall.Burn() // always show live value as last point
+		burnMu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			// Mission Control fields
+			"total_agents":     totalAgents,
+			"healthy":          healthy,
+			"blocked":          blockedCount,
+			"active_incidents": activeIncidents,
+			"active_policies":  len(policies),
+			"budget":           costFirewall.BudgetLimit,
+			"status":           "active",
+			// Cost Firewall fields
+			"total_cost":           costFirewall.Burn(),
+			"chart_data":           data,
+			"chart_labels":         labels,
+			"current_burn_rate":    costFirewall.Burn(),
+			"daily_total":          costFirewall.Burn(),
+			"blocked_requests":     blockedCount,
+			"active_policies_list": activePolicies,
+		})
+	}).Methods("GET", "OPTIONS")
+
+	// --- Cost Firewall ---
+	api.HandleFunc("/vigil/cost_firewall", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"budget": costFirewall.BudgetLimit, "burn": costFirewall.Burn(), "status": "active",
+		})
+	}).Methods("GET", "OPTIONS")
+
+	api.HandleFunc("/vigil/cost/metrics", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(costTracker.GetMetrics())
+	}).Methods("GET", "OPTIONS")
+
+	api.HandleFunc("/vigil/cost/policies", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(policyEngine.GetPolicies())
+	}).Methods("GET", "OPTIONS")
+
+	api.HandleFunc("/vigil/cost/policies", func(w http.ResponseWriter, r *http.Request) {
+		var pol cost.CostPolicy
+		if err := json.NewDecoder(r.Body).Decode(&pol); err != nil {
+			http.Error(w, `{"error":"invalid request body"}`, http.StatusBadRequest)
+			return
+		}
+		policyEngine.AddPolicy(r.Context(), pol)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]string{"status": "created"})
+	}).Methods("POST")
+
+	// --- Real Cost Data from ClickHouse ---
+	api.HandleFunc("/vigil/cost/real-metrics", func(w http.ResponseWriter, r *http.Request) {
+		if costProvider == nil {
+			http.Error(w, `{"error":"clickhouse not available"}`, http.StatusServiceUnavailable)
+			return
+		}
+		metrics, err := costProvider.QueryRealCosts(r.Context(), 24*time.Hour)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		json.NewEncoder(w).Encode(metrics)
+	}).Methods("GET")
+
+	// --- Replay Engine (backed by real ClickHouse) ---
+	api.HandleFunc("/vigil/replay/{trace_id}", func(w http.ResponseWriter, r *http.Request) {
+		traceCtx, err := replayEngine.ReconstructTrace(r.Context(), mux.Vars(r)["trace_id"])
+		if err != nil || traceCtx == nil {
+			http.Error(w, `{"error":"trace not found"}`, http.StatusNotFound)
+			return
+		}
+		json.NewEncoder(w).Encode(traceCtx)
+	}).Methods("GET")
+
+	api.HandleFunc("/vigil/replay/execute", func(w http.ResponseWriter, r *http.Request) {
+		var req replay.ReplayRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+		origCtx, err := replayEngine.ReconstructTrace(r.Context(), req.TraceID)
+		if err != nil || origCtx == nil {
+			http.Error(w, `{"error":"trace not found"}`, http.StatusNotFound)
+			return
+		}
+		newRes := replayEngine.Execute(r.Context(), &req, origCtx)
+		json.NewEncoder(w).Encode(differ.GenerateDiff(origCtx, &req, newRes))
+	}).Methods("POST")
+
+	// --- Agent DNA (backed by real ClickHouse) ---
+	api.HandleFunc("/vigil/agent_dna", func(w http.ResponseWriter, r *http.Request) {
+		if dnaBaselineProvider != nil {
+			agentID := r.URL.Query().Get("agent_id")
+			traceID := r.URL.Query().Get("trace_id")
+			if traceID != "" {
+				fp, err := dnaBaselineProvider.BuildFingerprintFromTrace(r.Context(), traceID, agentID)
+				if err != nil || fp == nil {
+					http.Error(w, `{"error":"fingerprint not found"}`, http.StatusNotFound)
+					return
+				}
+				report := dnaDetector.Evaluate(fp)
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"fingerprint": fp,
+					"report":      report,
+					"source":      "clickhouse",
+				})
+				return
+			}
+			baseline, err := dnaBaselineProvider.BuildBaselineFromTraces(r.Context(), agentID, 7*24*time.Hour)
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+				return
+			}
+			if baseline == nil {
+				http.Error(w, `{"error":"no baseline data found"}`, http.StatusNotFound)
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"baseline": baseline,
+				"source":   "clickhouse",
+			})
+		} else {
+			fp := dna.NewProfiler().GenerateFingerprint("trace-demo", "sales-bot",
+				[]string{"search", "calculator"}, []string{"gpt-4"}, 150, 500, 0.02)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"fingerprint": fp,
+				"report":      dnaDetector.Evaluate(fp),
+				"source":      "demo",
+			})
+		}
+	}).Methods("GET")
+
+	// --- Agent DNA Profiles — used by the Agent DNA frontend page ---
+	// Returns a list of profiles derived from in-memory agent state + DNA baselines.
+	api.HandleFunc("/vigil/dna/profiles", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		allAgents := agentTracker.GetAllAgents()
+		type DNAProfile struct {
+			AgentID               string         `json:"agent_id"`
+			BaselineCostPerRun    float64        `json:"baseline_cost_per_run"`
+			BaselineLatencyMs     float64        `json:"baseline_latency_ms"`
+			BaselineTokenUsage    int            `json:"baseline_token_usage"`
+			ToolUsageDistribution map[string]int `json:"tool_usage_distribution"`
+			AnomalyScore          float64        `json:"anomaly_score"`
+			DriftDetected         bool           `json:"drift_detected"`
+			LastUpdated           string         `json:"last_updated"`
+			RunCount              int            `json:"run_count"`
+			AvgCost               float64        `json:"avg_cost"`
+			AvgLatency            int64          `json:"avg_latency"`
+			P95Latency            int64          `json:"p95_latency"`
+		}
+		profiles := make([]DNAProfile, 0, len(allAgents))
+		for _, a := range allAgents {
+			anomalyScore := 0.1
+			driftDetected := false
+			if a.CurrentCost > 1.0 {
+				anomalyScore = a.CurrentCost / 10.0
+				if anomalyScore > 1.0 {
+					anomalyScore = 1.0
+				}
+			}
+			if a.Status == state.StatusBlocked || a.Status == state.StatusDead {
+				anomalyScore = 0.85
+				driftDetected = true
+			}
+			toolDist := map[string]int{}
+			if a.LastTool != "" {
+				toolDist[a.LastTool] = 1
+			}
+			profiles = append(profiles, DNAProfile{
+				AgentID:               a.AgentID,
+				BaselineCostPerRun:    0.05,
+				BaselineLatencyMs:     150.0,
+				BaselineTokenUsage:    800,
+				ToolUsageDistribution: toolDist,
+				AnomalyScore:          anomalyScore,
+				DriftDetected:         driftDetected,
+				LastUpdated:           a.UpdatedAt.Format(time.RFC3339),
+				RunCount:              a.CurrentTokens / 100,
+				AvgCost:               a.CurrentCost,
+				AvgLatency:            a.LatencyMs,
+				P95Latency:            a.LatencyMs * 2,
+			})
+		}
+		json.NewEncoder(w).Encode(profiles)
+	}).Methods("GET", "OPTIONS")
+
+	// Governance rules are served from the live engine by stack.registerRoutes;
+	// the hardcoded list that used to live here advertised nine rules as active
+	// while none of them were wired to anything.
+
+	// --- Agent DNA Baseline ---
+	api.HandleFunc("/vigil/agent_dna/baselines", func(w http.ResponseWriter, r *http.Request) {
+		if dnaBaselineProvider == nil {
+			http.Error(w, `{"error":"clickhouse not available"}`, http.StatusServiceUnavailable)
+			return
+		}
+		var req struct {
+			AgentID string `json:"agent_id"`
+			Days    int    `json:"days"`
+		}
+		if r.Method == "POST" {
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, "invalid request", http.StatusBadRequest)
+				return
+			}
+		} else {
+			req.AgentID = r.URL.Query().Get("agent_id")
+		}
+		days := req.Days
+		if days <= 0 {
+			days = 7
+		}
+		since := time.Duration(days) * 24 * time.Hour
+		baseline, err := dnaBaselineProvider.BuildBaselineFromTraces(r.Context(), req.AgentID, since)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		if baseline == nil {
+			http.Error(w, `{"error":"no baseline data found for this agent"}`, http.StatusNotFound)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"baseline": baseline,
+			"source":   "clickhouse",
+		})
+	}).Methods("GET", "POST")
+
+	// --- Dashboards Integration ---
+	api.HandleFunc("/vigil/dashboards/services", func(w http.ResponseWriter, r *http.Request) {
+		services, err := dashBuilder.GetARGUSServices(r.Context())
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"services": services,
+			"count":    len(services),
+		})
+	}).Methods("GET")
+
+	api.HandleFunc("/vigil/dashboards/metrics/{service}", func(w http.ResponseWriter, r *http.Request) {
+		serviceName := mux.Vars(r)["service"]
+		since := 1 * time.Hour
+		metrics, err := dashBuilder.GetServiceMetrics(r.Context(), serviceName, since)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		json.NewEncoder(w).Encode(metrics)
+	}).Methods("GET")
+
+	api.HandleFunc("/vigil/dashboards/templates", func(w http.ResponseWriter, r *http.Request) {
+		orgID := r.URL.Query().Get("org_id")
+		if orgID == "" {
+			orgID = "default"
+		}
+		templates := dashboards.GetARGUSDashboardTemplates(orgID)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"templates": templates,
+			"count":     len(templates),
+		})
+	}).Methods("GET")
+
+	api.HandleFunc("/vigil/dashboards/build/{type}", func(w http.ResponseWriter, r *http.Request) {
+		dashType := mux.Vars(r)["type"]
+		orgID := r.URL.Query().Get("org_id")
+		if orgID == "" {
+			orgID = "default"
+		}
+		var jsonBytes []byte
+		var err error
+		switch dashType {
+		case "governance":
+			services, _ := dashBuilder.GetARGUSServices(r.Context())
+			jsonBytes, err = dashboards.BuildGovernanceDashboardJSON(services, orgID)
+		case "cost":
+			jsonBytes, err = dashboards.BuildCostDashboardJSON(orgID)
+		case "dna":
+			jsonBytes, err = dashboards.BuildAgentDNADashboardJSON(orgID)
+		default:
+			http.Error(w, `{"error":"unknown dashboard type: governance, cost, or dna"}`, http.StatusBadRequest)
+			return
+		}
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(jsonBytes)
+	}).Methods("GET")
+
+	// --- Investigation / RCA ---
+	api.HandleFunc("/vigil/investigate/{trace_id}", func(w http.ResponseWriter, r *http.Request) {
+		traceID := mux.Vars(r)["trace_id"]
+		if invest == nil {
+			traceCtx, err := replayEngine.ReconstructTrace(r.Context(), traceID)
+			if err != nil || traceCtx == nil {
+				http.Error(w, `{"error":"trace not found"}`, http.StatusNotFound)
+				return
+			}
+			report := map[string]interface{}{
+				"trace_id":   traceID,
+				"agent":      traceCtx.Model,
+				"prompt":     traceCtx.OriginalPrompt,
+				"tools":      traceCtx.Tools,
+				"latency_ms": traceCtx.LatencyMs,
+				"cost":       traceCtx.Cost,
+				"note":       "telemetry store not available - limited investigation",
+			}
+			json.NewEncoder(w).Encode(report)
+			return
+		}
+		agentCtx := &engine.AgentContext{
+			TraceID:     traceID,
+			ProjectName: r.URL.Query().Get("service"),
+		}
+		violation := engine.RuleResult{
+			RuleName:          r.URL.Query().Get("rule"),
+			Severity:          engine.SeverityHigh,
+			Reason:            "Manual investigation triggered",
+			RecommendedAction: "Review trace data",
+			AutomaticAction:   engine.ActionAlert,
+		}
+		report, err := invest.Investigate(r.Context(), violation, agentCtx)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		json.NewEncoder(w).Encode(report)
+	}).Methods("GET")
+
+	api.HandleFunc("/vigil/investigate/trace/{trace_id}", func(w http.ResponseWriter, r *http.Request) {
+		traceID := mux.Vars(r)["trace_id"]
+		if !hasClickHouse {
+			http.Error(w, `{"error":"telemetry store required for deep investigation"}`, http.StatusServiceUnavailable)
+			return
+		}
+		ctx, err := invest.GetTraceContext(r.Context(), traceID)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		json.NewEncoder(w).Encode(ctx)
+	}).Methods("GET")
+
+	// --- Alerts Integration ---
+	api.HandleFunc("/vigil/alerts/rules", func(w http.ResponseWriter, r *http.Request) {
+		rules := alerts.DefaultRuleMappings()
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"rules": rules,
+			"count": len(rules),
+		})
+	}).Methods("GET")
+
+	api.HandleFunc("/vigil/alerts/signoz", func(w http.ResponseWriter, r *http.Request) {
+		if alertManager == nil {
+			http.Error(w, `{"error":"alertmanager not available - requires full SigNoz query service"}`, http.StatusServiceUnavailable)
+			return
+		}
+		signozAlerts, err := alertManager.ListSigNozAlerts(r.Context())
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"alerts": signozAlerts,
+			"count":  len(signozAlerts),
+		})
+	}).Methods("GET")
+
+	api.HandleFunc("/vigil/alerts/channels", func(w http.ResponseWriter, r *http.Request) {
+		if alertManager == nil {
+			http.Error(w, `{"error":"alertmanager not available - requires full SigNoz query service"}`, http.StatusServiceUnavailable)
+			return
+		}
+		channels, err := alertManager.ListNotificationChannels(r.Context())
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"channels": channels,
+			"count":    len(channels),
+		})
+	}).Methods("GET")
+
+	api.HandleFunc("/vigil/alerts/explain", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			RuleName    string `json:"rule_name"`
+			Reason      string `json:"reason"`
+			Severity    string `json:"severity"`
+			AgentID     string `json:"agent_id"`
+			TraceID     string `json:"trace_id"`
+			ProjectName string `json:"project_name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		explanation := "ARGUS Alert: " + req.RuleName + "\nReason: " + req.Reason + "\nAgent: " + req.AgentID + "\nTrace: " + req.TraceID
+		json.NewEncoder(w).Encode(map[string]string{
+			"explanation": explanation,
+		})
+	}).Methods("POST")
+
+	// --- SigNoz Cloud Integration ---
+	// These endpoints use the OTEL_EXPORTER_OTLP_* env vars from .env.local
+	// to enable connectivity checks and config generation.
+	hasSigNozCreds := signozEndpoint != "" && signozIngestionKey != ""
+
+	// detectRegion extracts the SigNoz Cloud region name from the endpoint URL.
+	detectRegion := func() string {
+		for _, r := range integration.AvailableRegions() {
+			if strings.Contains(signozEndpoint, r.Name+".signoz.cloud") {
+				return r.Name
+			}
+		}
+		return "us"
+	}
+
+	api.HandleFunc("/vigil/signoz/health", func(w http.ResponseWriter, r *http.Request) {
+		if !hasSigNozCreds {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"configured": false,
+				"status":     "not_configured",
+				"message":    "SigNoz Cloud credentials not configured. Set OTEL_EXPORTER_OTLP_ENDPOINT and OTEL_EXPORTER_OTLP_HEADERS.",
+				"region":     nil,
+			})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"configured": true,
+			"status":     "active",
+			"endpoint":   signozEndpoint,
+			"region":     detectRegion(),
+			"key_length": len(signozIngestionKey),
+			"message":    "SigNoz Cloud credentials loaded. Use /vigil/signoz/config to generate OTel exporter config.",
+		})
+	}).Methods("GET")
+
+	api.HandleFunc("/vigil/signoz/config", func(w http.ResponseWriter, r *http.Request) {
+		if !hasSigNozCreds {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]string{"error": "SigNoz Cloud not configured. Set OTEL_EXPORTER_OTLP_ENDPOINT and OTEL_EXPORTER_OTLP_HEADERS."})
+			return
+		}
+		otelConfig, err := integration.DefaultCollectorConfig(detectRegion(), signozIngestionKey)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		w.Header().Set("Content-Type", "text/yaml")
+		w.Write([]byte(otelConfig.GenerateOTLPExporterConfig()))
+	}).Methods("GET")
+
+	api.HandleFunc("/vigil/signoz/env", func(w http.ResponseWriter, r *http.Request) {
+		if !hasSigNozCreds {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]string{"error": "SigNoz Cloud not configured. Set OTEL_EXPORTER_OTLP_ENDPOINT and OTEL_EXPORTER_OTLP_HEADERS."})
+			return
+		}
+		serviceName := r.URL.Query().Get("service")
+		if serviceName == "" {
+			serviceName = "argus-agent"
+		}
+		format := r.URL.Query().Get("format") // "docker", "kubernetes", or "shell" (default)
+		otelConfig, err := integration.DefaultCollectorConfig(detectRegion(), signozIngestionKey)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		var output string
+		switch format {
+		case "docker":
+			output = otelConfig.GenerateDockerEnvVars(serviceName)
+		case "kubernetes":
+			output = otelConfig.GenerateKubernetesEnvVars(serviceName)
+		default:
+			output = otelConfig.GenerateEnvVars(serviceName)
+		}
+		w.Header().Set("Content-Type", "text/plain")
+		w.Write([]byte(output))
+	}).Methods("GET")
+
+	// --- MCP Server (Claude Web + Claude Desktop + Cursor integration) ---
+	// The MCP server lets any MCP client connect to ARGUS as a tool server.
+	// Claude Web connects via OAuth 2.1 Bearer token (real connection).
+	// Claude Desktop connects via SSE session (config-based).
+	// Every tool call is intercepted, metered for cost, and streamed to the
+	// Next.js Control Plane via WebSocket.
+	mcpServer := mcp.NewMCPServerHTTP(logger, ".")
+
+	// --- Vigil 2.0 governance stack ---
+	// Builds the governance engine, recovery actions, model router, audit
+	// ledger, and decision pipeline, then puts the pipeline on the tool-call
+	// hot path. Before this the engine and its plugins existed but were
+	// referenced only from tests.
+	vigilStack := buildStack(logger, budgetLimit)
+	mcpServer.Core().SetFirewall(vigilStack.mcpAdapter())
+	// vigil_agent_dna reports what the firewall has actually observed for a
+	// session, rather than the fixed demo fingerprint it used to return.
+	// Session-control routes mutate enforcement state, so they take the same
+	// operator guard as the kill switch.
+	mcpServer.SetControlGuard(requireControlAuth)
+	mcpServer.Core().SetBehaviour(func(sessionID string) any {
+		return vigilStack.fw.Behaviour(sessionID)
+	})
+	vigilStack.registerRoutes(api, mcpServer.Core(), budgetLimit)
+
+	// Now that mcpServer exists, wire up the OAuth token-minted callback.
+	// Called when Claude Web completes OAuth and gets a Bearer token — pre-registers the session.
+	onTokenMinted = func(sessionID string, budget float64, clientName string) {
+		mcpServer.Core().PutSession(mcp.ClientSession{
+			ID:            sessionID,
+			ClientName:    clientName,
+			ClientVersion: "claude-web",
+			ConnectedAt:   time.Now(),
+			BudgetLimit:   budget,
+		})
+		agentTracker.UpsertAgent(&state.AgentState{
+			AgentID:  sessionID,
+			Status:   state.StatusRunning,
+			LastTool: "connected",
+		})
+		// The budget the user approved during consent becomes the session's
+		// policy budget, so cost enforcement and the consent screen agree.
+		vigilStack.policies.Set(policy.Default(sessionID, budget))
+		wsHub.BroadcastMessage(map[string]interface{}{
+			"type":  "MCP_EVENT",
+			"event": "mcp_client_connected",
+			"data": map[string]interface{}{
+				"client_id":   sessionID,
+				"client_name": clientName,
+				"budget":      budget,
+				"source":      "claude-web",
+			},
+			"timestamp": time.Now(),
+		})
+		// Emit real span → SigNoz proof of OAuth connection
+		telemetry.RecordSessionConnect(context.Background(), sessionID, clientName, budget)
+		logger.InfoContext(context.Background(), "argus oauth: Claude Web session activated",
+			slog.String("session_id", sessionID),
+			slog.Float64("budget", budget),
+			slog.String("client", clientName),
+		)
+	}
+
+	// Wire the cost firewall: every MCP tool call reports cost to ARGUS
+	mcpServer.Core().SetCostCallback(func(agentID string, toolCost, sessionTotal float64, tool string) {
+		fleetBurn := costFirewall.Add(toolCost)
+		agentTracker.UpsertAgent(&state.AgentState{
+			AgentID:       agentID,
+			Status:        state.StatusRunning,
+			CurrentCost:   sessionTotal, // this session's own spend, not the fleet total
+			CurrentTokens: 0,
+			LatencyMs:     0,
+			LastTool:      tool,
+		})
+		logger.InfoContext(context.Background(), "argus mcp: tool call cost tracked",
+			slog.String("agent", agentID),
+			slog.String("tool", tool),
+			slog.Float64("cost", toolCost),
+			slog.Float64("session_total", sessionTotal),
+			slog.Float64("fleet_burn", fleetBurn),
+			slog.Float64("budget", costFirewall.BudgetLimit),
+		)
+
+		// Emit real OTel span → ships to SigNoz Cloud
+		telemetry.RecordMCPToolCall(context.Background(), agentID, tool, toolCost, sessionTotal)
+
+		// Save a TraceContext so the Replay engine has real data to work with.
+		// TraceID = sessionID so the user can pass the session ID to /replay/{id}.
+		_ = traceStore.SaveTrace(context.Background(), &replay.TraceContext{
+			TraceID:        agentID,
+			OriginalPrompt: "Tool call: " + tool,
+			Model:          "gpt-4o-mini",
+			Tools:          []string{tool},
+			LatencyMs:      0,
+			Cost:           sessionTotal,
+		})
+
+		// Broadcast via WebSocket so the frontend updates in real-time
+		wsHub.BroadcastMessage(map[string]interface{}{
+			"type":      "MCP_TOOL_CALL",
+			"agent_id":  agentID,
+			"tool":      tool,
+			"cost":      toolCost,
+			"total":     sessionTotal,
+			"budget":    costFirewall.BudgetLimit,
+			"timestamp": time.Now(),
+		})
+	})
+
+	// Wire the event stream: MCP connect/disconnect/block events go to frontend
+	mcpServer.Core().SetEventCallback(func(eventType string, data any) {
+		wsHub.BroadcastMessage(map[string]interface{}{
+			"type":      "MCP_EVENT",
+			"event":     eventType,
+			"data":      data,
+			"timestamp": time.Now(),
+		})
+	})
+
+	// Mount MCP routes on the API subrouter
+	mcpServer.RegisterRoutes(api)
+
+	// --- OAuth 2.1 AS routes (enables Claude Web real connection) ---
+	// Mounts: /.well-known/*, /register, /authorize, /token on root router
+	// Mounts: /api/v1/vigil/oauth/* consent API on api subrouter
+	vigilOAuth.RegisterRoutes(r, api, oauthStore, onTokenMinted)
+
+	// --- Override the MCP POST handler to authenticate Bearer tokens from Claude Web ---
+	// When Claude Web connects via OAuth 2.1 it sends Authorization: Bearer rmt_at_...
+	// We resolve that token to a ClientSession and proceed normally.
+	api.HandleFunc("/mcp/bearer", func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Content-Type", "application/json")
+
+		if req.Method == http.MethodOptions {
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		// Extract Bearer token
+		authHeader := req.Header.Get("Authorization")
+		rawToken := strings.TrimPrefix(authHeader, "Bearer ")
+		rawToken = strings.TrimPrefix(rawToken, "bearer ")
+		if rawToken == "" || rawToken == authHeader {
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+vigilOAuth.PublicBase()+`/.well-known/oauth-protected-resource"`)
+			json.NewEncoder(w).Encode(map[string]string{"error": "missing bearer token"})
+			return
+		}
+
+		tok := oauthStore.GetByBearerToken(rawToken)
+		if tok == nil {
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]string{"error": "invalid or expired token"})
+			return
+		}
+
+		// Route to the MCP core handler using the session ID as client ID
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			http.Error(w, `{"error":"read error"}`, http.StatusBadRequest)
+			return
+		}
+		response := mcpServer.Core().HandleRequest(req.Context(), body, tok.SessionID)
+		if response == nil {
+			w.WriteHeader(http.StatusAccepted)
+			w.Write([]byte(`{}`))
+			return
+		}
+		json.NewEncoder(w).Encode(response)
+	}).Methods("POST", "OPTIONS")
+
+	logger.InfoContext(context.Background(), "argus: OAuth 2.1 AS initialized",
+		slog.String("authorize", "/authorize"),
+		slog.String("token", "/token"),
+		slog.String("register", "/register"),
+		slog.String("discovery", "/.well-known/oauth-authorization-server"),
+	)
+
+	logger.InfoContext(context.Background(), "argus: MCP server initialized",
+		slog.String("endpoint", "/api/v1/mcp"),
+	)
+
+	// --- WebSocket ---
+	api.HandleFunc("/vigil/ws", func(w http.ResponseWriter, r *http.Request) {
+		state.ServeWs(w, r)
+	})
+
+	api.HandleFunc("/vigil/agent-ws", func(w http.ResponseWriter, r *http.Request) {
+		state.ServeAgentWs(w, r)
+	})
+
+	// --- Agent Management ---
+	api.HandleFunc("/vigil/agents", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		agents := agentTracker.GetAllAgents()
+		if agents == nil {
+			agents = []state.AgentState{}
+		}
+		json.NewEncoder(w).Encode(agents)
+	}).Methods("GET", "OPTIONS")
+
+	for _, action := range []string{"kill", "pause", "resume"} {
+		a := action
+		api.HandleFunc("/vigil/agents/{id}/"+a, requireControlAuth(func(w http.ResponseWriter, r *http.Request) {
+			id := mux.Vars(r)["id"]
+			switch a {
+			case "kill":
+				agentTracker.UpdateStatus(id, state.StatusDead)
+				agentHub.SendCommand(id, "KILL")
+			case "pause":
+				agentTracker.UpdateStatus(id, state.StatusPaused)
+				agentHub.SendCommand(id, "PAUSE")
+			case "resume":
+				agentTracker.UpdateStatus(id, state.StatusRunning)
+				agentHub.SendCommand(id, "RESUME")
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]string{"status": "ok", "agent_id": id, "action": a})
+		})).Methods("POST", "OPTIONS")
+	}
+
+	return &http.Server{
+		Addr:         addr,
+		Handler:      legacyPathRewrite(r),
+		ReadTimeout: 15 * time.Second,
+		// WriteTimeout must exceed the firewall's judge budget (10s by default,
+		// VIGIL_JUDGE_BUDGET_SECONDS). If it does not, a tool call that escalates
+		// to the model has its connection closed mid-decision — the agent sees a
+		// dropped socket instead of a BLOCK, which is a fail-open wearing a
+		// network error's clothes.
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+}
+
+// legacyPathRewrite maps the pre-rename /api/v1/argus/* paths onto their
+// canonical /api/v1/vigil/* equivalents before routing.
+//
+// Deployments provisioned before the ARGUS → Vigil rename (and any dashboard
+// build not yet redeployed) still call the old paths. Rewriting here rather
+// than registering every route twice keeps the alias in one place and makes it
+// trivial to delete once no old clients remain.
+func legacyPathRewrite(next http.Handler) http.Handler {
+	const legacy, canonical = "/api/v1/argus/", "/api/v1/vigil/"
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, legacy) {
+			r.URL.Path = canonical + strings.TrimPrefix(r.URL.Path, legacy)
+		}
+		next.ServeHTTP(w, r)
+	})
+}

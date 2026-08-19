@@ -1,0 +1,16 @@
+.git
+.gitignore
+.env
+.env.*
+node_modules/
+.next/
+dist/
+out/
+.vercel
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out

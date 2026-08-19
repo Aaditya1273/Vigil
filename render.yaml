@@ -1,0 +1,44 @@
+services:
+  - type: web
+    name: vigil-server
+    env: docker
+    dockerfilePath: ./Dockerfile
+    region: oregon
+    plan: free
+    healthCheckPath: /api/v1/vigil/stats
+    envVars:
+      # ── Required ──────────────────────────────────────────────────────────────
+      # The public URL Render assigns to this service (fill after first deploy)
+      # e.g. https://vigil-server.onrender.com
+      - key: VIGIL_PUBLIC_BASE
+        sync: false
+
+      # URL of your deployed Vercel frontend (fill after Vercel deploy)
+      # e.g. https://vigil.vercel.app
+      - key: VIGIL_DASHBOARD_BASE
+        sync: false
+
+      # ── AI Inference (Featherless — optional; deterministic-only without it) ──
+      - key: VIGIL_FEATHERLESS_API_KEY
+        sync: false
+
+      # ── Model identifiers (required if the key above is set) ──────────────────
+      # Recommended: moonshotai/Kimi-K3 (fast, reasoner), zai-org/GLM-5.2 (reviewer)
+      - key: VIGIL_FEATHERLESS_MODEL_FAST
+        sync: false
+      - key: VIGIL_FEATHERLESS_MODEL_REASONER
+        sync: false
+      - key: VIGIL_FEATHERLESS_MODEL_REVIEWER
+        sync: false
+
+      # ── Observability (optional — backend runs without these) ─────────────────
+      - key: OTEL_EXPORTER_OTLP_ENDPOINT
+        sync: false
+      - key: OTEL_EXPORTER_OTLP_HEADERS
+        sync: false
+
+      # ── Budget & safety ───────────────────────────────────────────────────────
+      - key: VIGIL_BUDGET_LIMIT
+        value: "100"
+      - key: VIGIL_ALLOW_EXEC
+        value: "false"

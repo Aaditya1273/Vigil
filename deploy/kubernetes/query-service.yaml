@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vigil-query-service
+  namespace: vigil-system
+  labels:
+    app: vigil-query-service
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: vigil-query-service
+  template:
+    metadata:
+      labels:
+        app: vigil-query-service
+    spec:
+      containers:
+      - name: vigil-query-service
+        image: vigil/query-service:latest
+        ports:
+        - containerPort: 8080
+        env:
+        - name: CLICKHOUSE_HOST
+          value: "vigil-clickhouse"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vigil-query-service
+  namespace: vigil-system
+spec:
+  selector:
+    app: vigil-query-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8080
+  type: ClusterIP

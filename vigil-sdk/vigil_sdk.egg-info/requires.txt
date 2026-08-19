@@ -1,0 +1,15 @@
+opentelemetry-api
+opentelemetry-sdk
+opentelemetry-exporter-otlp
+openinference-instrumentation-openai
+openinference-instrumentation-langchain
+openinference-instrumentation-llamaindex
+openinference-instrumentation-crewai
+websocket-client
+
+[test]
+pytest
+openai
+langchain
+crewai
+llama-index

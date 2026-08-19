@@ -1,0 +1,70 @@
+name: Release
+
+# semantic-release decides whether a release is warranted by reading the
+# Conventional Commits since the last tag. A push with only docs/chore/ci
+# commits produces no release, which is why this can safely run on every push
+# to main rather than on a manual trigger.
+#
+# It replaces a GoReleaser job that ran on every v* tag against a
+# .goreleaser.yaml that does not exist in this repository, so a tagged release
+# could only ever fail.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write # create tags, releases, and commit CHANGELOG.md
+  issues: write # comment on released issues
+  pull-requests: write # comment on released PRs
+
+concurrency:
+  # Never let two releases race for the same tag.
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify before releasing
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+      - name: Build
+        run: go build ./...
+      - name: Vet
+        run: go vet ./pkg/query-service/vigil/... ./cmd/...
+      - name: Test
+        run: go test -race -count=1 ./pkg/query-service/vigil/...
+
+  release:
+    name: semantic-release
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # semantic-release reads the full history to find the last tag and
+          # every commit since it. A shallow clone silently produces wrong
+          # version bumps.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install release tooling
+        run: npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+
+      - name: Release
+        env:
+          # The workflow token is enough: it can tag, release, and push the
+          # changelog commit. No personal access token or bot secret is needed,
+          # so there is no credential to store or rotate.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx semantic-release

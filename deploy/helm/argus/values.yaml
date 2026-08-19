@@ -1,0 +1,23 @@
+replicaCount: 3
+
+image:
+  repository: vigil/query-service
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: true
+  className: "nginx"
+  hosts:
+    - host: vigil.local
+      paths:
+        - path: /
+          pathType: ImplementationSpecific
+
+clickhouse:
+  enabled: true
+  host: "vigil-clickhouse"

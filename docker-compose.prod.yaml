@@ -1,0 +1,40 @@
+version: "3.8"
+
+services:
+  vigil-control-plane:
+    image: vigil/control-plane:v1.0.0
+    container_name: vigil-control-plane
+    restart: always
+    ports:
+      - "8080:8080" # REST API & WebSockets
+      - "4317:4317" # OTLP gRPC
+      - "4318:4318" # OTLP HTTP
+    environment:
+      - VIGIL_ENV=production
+      - VIGIL_REDIS_URL=redis://vigil-redis:6379
+      - VIGIL_LOG_LEVEL=info
+    depends_on:
+      - vigil-redis
+
+  vigil-redis:
+    image: redis:7-alpine
+    container_name: vigil-redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - vigil_redis_data:/data
+    command: redis-server --appendonly yes
+
+  vigil-frontend:
+    image: vigil/frontend:v1.0.0
+    container_name: vigil-frontend
+    restart: always
+    ports:
+      - "3301:3301"
+    environment:
+      - NODE_ENV=production
+      - REACT_APP_API_URL=http://vigil-control-plane:8080/api/v1
+
+volumes:
+  vigil_redis_data:

@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "signoz": {
+      "serverUrl": "https://mcp.in2.signoz.cloud/mcp"
+    }
+  }
+}

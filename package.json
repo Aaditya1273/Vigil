@@ -1,0 +1,18 @@
+{
+  "name": "vigil-release",
+  "version": "0.0.0-semantically-released",
+  "private": true,
+  "description": "Release tooling only. Vigil is a Go project; this manifest exists so semantic-release and its plugins resolve at the repository root.",
+  "license": "SEE LICENSE IN LICENSE",
+  "scripts": {
+    "release": "semantic-release",
+    "release:dry": "semantic-release --dry-run --no-ci"
+  },
+  "devDependencies": {
+    "@semantic-release/changelog": "^6.0.3",
+    "@semantic-release/git": "^10.0.1",
+    "@semantic-release/github": "^11.0.1",
+    "conventional-changelog-conventionalcommits": "^8.0.0",
+    "semantic-release": "^24.2.3"
+  }
+}

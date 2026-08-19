@@ -1,0 +1,549 @@
+@import "tailwindcss";
+
+/* Same Epilogue file the landing page uses (frontend/public/fonts) — the
+   dashboard borrows the brand's display typeface for headings only, so
+   table/body text stays on Inter for density and legibility. */
+@font-face {
+  font-family: 'Epilogue';
+  src: url('/fonts/Epilogue-VariableFont_wght.ttf') format('truetype');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   ARGUS — Enterprise Design Tokens
+   Palette: Black (#0A0A0A) · White (#FFFFFF) · Orange (#FF6B00)
+   ══════════════════════════════════════════════════════════════ */
+:root {
+  --black:       #0A0A0A;
+  --black-soft:  #1A1A1A;
+  --white:       #FFFFFF;
+  --white-soft:  #F7F7F7;
+  --orange:      #FF6B00;
+  --orange-dark: #CC5500;
+  --orange-light:#FFF5ED;
+  --gray-50:     #F7F7F7;
+  --gray-100:    #EBEBEB;
+  --gray-200:    #D4D4D4;
+  --gray-300:    #A3A3A3;
+  --gray-400:    #737373;
+  --gray-500:    #525252;
+  --gray-600:    #404040;
+  --gray-700:    #2B2B2B;
+  --gray-800:    #1A1A1A;
+  --gray-900:    #0D0D0D;
+  --radius-sm:   4px;
+  --radius-md:   8px;
+  --radius-lg:   12px;
+  --radius-xl:   16px;
+  --radius-2xl:  20px;
+  /* Landing page's warm-paper background (frontend/src/app/styles/base.css
+     --bg-color), reused so the dashboard reads as the same product instead
+     of a plain white admin panel bolted onto a cinematic marketing site. */
+  --paper:       #F5F1EA;
+  /* Landing page's springy "back ease" overshoot (approximates its GSAP
+     elastic.out hovers without pulling GSAP into every dashboard page). */
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.font-display {
+  font-family: 'Epilogue', -apple-system, sans-serif;
+}
+
+/* ─── Base ─── */
+html { 
+  scroll-behavior: smooth; 
+  -webkit-font-smoothing: antialiased;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+::-webkit-scrollbar {
+  display: none;
+}
+body {
+  background: var(--white);
+  color: var(--black);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Inter, sans-serif;
+}
+::selection { background: var(--orange); color: var(--white); }
+
+/* ─── Typography ─── */
+.h0 { font-size: clamp(3.5rem, 8vw, 7rem); line-height: 1.05; letter-spacing: -0.04em; font-weight: 700; font-family: 'Epilogue', -apple-system, sans-serif; }
+.h1 { font-size: clamp(2.5rem, 5vw, 4.5rem); line-height: 1.08; letter-spacing: -0.03em; font-weight: 700; font-family: 'Epilogue', -apple-system, sans-serif; }
+.h2 { font-size: clamp(2rem, 3.5vw, 3rem); line-height: 1.12; letter-spacing: -0.02em; font-weight: 700; font-family: 'Epilogue', -apple-system, sans-serif; }
+.h3 { font-size: clamp(1.25rem, 2vw, 1.5rem); line-height: 1.3; letter-spacing: -0.01em; font-weight: 600; font-family: 'Epilogue', -apple-system, sans-serif; }
+
+/* Every dashboard page's <h1> page title picks up the brand's display
+   typeface automatically — the shared shell sets this once instead of each
+   of the 8 dashboard pages importing a heading class individually. */
+.dashboard-shell h1 {
+  font-family: 'Epilogue', -apple-system, sans-serif;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+.subtitle { font-size: 1.125rem; line-height: 1.6; color: var(--gray-400); }
+.body-sm { font-size: 0.875rem; line-height: 1.5; color: var(--gray-400); }
+.mono { font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace; }
+.label { font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--gray-400); }
+
+/* ─── Orange accent ─── */
+.orange-text { color: var(--orange); }
+.orange-border { border-color: var(--orange); }
+.orange-bg { background: var(--orange); color: var(--white); }
+.orange-bg-soft { background: var(--orange-light); }
+
+/* ─── Cards ─── */
+.card-enterprise {
+  background: var(--white);
+  border: 1px solid var(--gray-200);
+  border-radius: var(--radius-lg);
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+.card-enterprise:hover {
+  border-color: var(--gray-300);
+  box-shadow: 0 4px 24px rgba(0,0,0,0.04);
+}
+.card-dark {
+  background: var(--black);
+  border: 1px solid var(--gray-700);
+  border-radius: var(--radius-lg);
+  color: var(--white);
+}
+
+/* ─── Buttons ─── */
+.btn-primary {
+  display: inline-flex; align-items: center; gap: 8px;
+  background: var(--black); color: var(--white);
+  padding: 12px 28px; border-radius: var(--radius-md);
+  font-size: 0.9375rem; font-weight: 600;
+  border: none; cursor: pointer;
+  transition: background 0.15s ease, transform 0.1s ease;
+}
+.btn-primary:hover { background: var(--gray-800); }
+.btn-primary:active { transform: scale(0.98); }
+
+.btn-secondary {
+  display: inline-flex; align-items: center; gap: 8px;
+  background: transparent; color: var(--black);
+  padding: 12px 28px; border-radius: var(--radius-md);
+  font-size: 0.9375rem; font-weight: 600;
+  border: 1px solid var(--gray-200); cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.btn-secondary:hover { border-color: var(--gray-300); background: var(--gray-50); }
+
+.btn-ghost {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: transparent; color: var(--gray-400);
+  padding: 8px 16px; border-radius: var(--radius-sm);
+  font-size: 0.8125rem; font-weight: 500;
+  border: none; cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+.btn-ghost:hover { color: var(--black); background: var(--gray-50); }
+
+/* ─── Section layout ─── */
+.section-pad { padding: 120px 24px; }
+.section-container { max-width: 1280px; margin: 0 auto; }
+.section-header { max-width: 640px; margin-bottom: 64px; }
+.section-header.centered { text-align: center; margin-left: auto; margin-right: auto; }
+
+/* ─── Grid helpers ─── */
+.grid-auto { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 24px; }
+.grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 24px; }
+.grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; }
+.grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 24px; }
+
+/* ─── Terminal ─── */
+.terminal {
+  background: var(--black);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--gray-700);
+  overflow: hidden;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 0.8125rem;
+  line-height: 1.6;
+}
+.terminal-header {
+  display: flex; align-items: center; gap: 8px;
+  padding: 12px 16px;
+  background: var(--gray-800);
+  border-bottom: 1px solid var(--gray-700);
+}
+.terminal-dot { width: 8px; height: 8px; border-radius: 50%; }
+.terminal-dot.red { background: #FF5F57; }
+.terminal-dot.yellow { background: #FEBC2E; }
+.terminal-dot.green { background: #28C840; }
+.terminal-title { font-size: 0.75rem; color: var(--gray-400); margin-left: 8px; }
+.terminal-body { padding: 16px; max-height: 400px; overflow-y: auto; }
+.terminal-line {
+  display: flex; align-items: flex-start; gap: 12px;
+  padding: 4px 0;
+  opacity: 0;
+  animation: terminalFadeIn 0.3s ease forwards;
+}
+.terminal-time { color: var(--gray-500); flex-shrink: 0; min-width: 72px; }
+.terminal-arrow { color: var(--orange); flex-shrink: 0; }
+.terminal-tool { color: var(--white); }
+.terminal-detail { color: var(--gray-400); }
+.terminal-cost { color: var(--orange); font-weight: 500; }
+.terminal-pass { color: #22C55E; }
+.terminal-block { color: #EF4444; }
+.terminal-warn { color: #F59E0B; }
+
+/* ─── Animations ─── */
+@keyframes terminalFadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(24px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes slideInRight {
+  from { opacity: 0; transform: translateX(16px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+@keyframes packet-move {
+  0% { transform: translateX(0); opacity: 0; }
+  10% { opacity: 1; }
+  90% { opacity: 1; }
+  100% { transform: translateX(var(--travel, 200px)); opacity: 0; }
+}
+@keyframes pipeline-node-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255,107,0,0.3); }
+  50% { box-shadow: 0 0 0 12px rgba(255,107,0,0); }
+}
+
+
+.animate-fadeIn { animation: fadeIn 0.5s ease forwards; }
+.animate-fadeInUp { animation: fadeInUp 0.6s cubic-bezier(0.16,1,0.3,1) forwards; }
+.animate-slideInRight { animation: slideInRight 0.4s ease forwards; }
+.animate-pulse-dot { animation: pulse-dot 1.5s ease infinite; }
+
+/* ─── Reveal (scroll) ─── */
+.reveal { opacity: 0; transform: translateY(24px); transition: opacity 0.6s cubic-bezier(0.16,1,0.3,1), transform 0.6s cubic-bezier(0.16,1,0.3,1); }
+.reveal.visible { opacity: 1; transform: translateY(0); }
+.reveal-delay-1 { transition-delay: 0.1s; }
+.reveal-delay-2 { transition-delay: 0.2s; }
+.reveal-delay-3 { transition-delay: 0.3s; }
+.reveal-delay-4 { transition-delay: 0.4s; }
+
+/* ─── Pipeline diagram ─── */
+.pipeline-container {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  padding: 32px 0;
+}
+.pipeline-node {
+  position: relative;
+  display: flex; flex-direction: column; align-items: center; gap: 8px;
+  z-index: 2;
+  min-width: 100px;
+}
+.pipeline-node-circle {
+  width: 56px; height: 56px;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 18px; font-weight: 700;
+  border: 2px solid var(--gray-200);
+  background: var(--white);
+  transition: border-color 0.3s ease, background 0.3s ease;
+}
+.pipeline-node.active .pipeline-node-circle {
+  border-color: var(--orange);
+  background: var(--orange-light);
+  animation: pipeline-node-pulse 2s ease infinite;
+}
+.pipeline-node-label {
+  font-size: 0.75rem; font-weight: 600;
+  color: var(--gray-400);
+  text-align: center;
+}
+.pipeline-line {
+  flex: 1; height: 2px;
+  background: var(--gray-200);
+  position: relative;
+  z-index: 1;
+}
+.pipeline-line.active { background: var(--orange); }
+.pipeline-packet {
+  position: absolute;
+  top: 50%; left: 0;
+  width: 8px; height: 8px;
+  margin-top: -4px;
+  border-radius: 50%;
+  background: var(--orange);
+  animation: packet-move 2s ease infinite;
+}
+
+/* ─── Scrollbar ─── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--gray-200); border-radius: 99px; }
+::-webkit-scrollbar-thumb:hover { background: var(--gray-300); }
+
+/* ─── Dashboard mock ─── */
+.dashboard-mock {
+  background: var(--white);
+  border: 1px solid var(--gray-200);
+  border-radius: var(--radius-xl);
+  overflow: hidden;
+  box-shadow: 0 8px 40px rgba(0,0,0,0.06);
+}
+.dashboard-mock-header {
+  display: flex; align-items: center; gap: 12px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--gray-100);
+  background: var(--gray-50);
+}
+.dashboard-mock-sidebar {
+  width: 200px;
+  border-right: 1px solid var(--gray-100);
+  padding: 16px;
+  flex-shrink: 0;
+}
+
+/* ─── Integration chip ─── */
+.integration-chip {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 8px 16px;
+  border: 1px solid var(--gray-200);
+  border-radius: var(--radius-md);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--gray-500);
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+.integration-chip:hover { border-color: var(--orange); color: var(--orange); }
+
+/* ─── Status badges ─── */
+.badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 10px;
+  border-radius: 9999px;
+  font-size: 0.75rem; font-weight: 500;
+}
+.badge-pass { background: #F0FDF4; color: #16A34A; }
+.badge-block { background: #FEF2F2; color: #DC2626; }
+.badge-warn { background: var(--orange-light); color: var(--orange); }
+.badge-neutral { background: var(--gray-50); color: var(--gray-500); border: 1px solid var(--gray-200); }
+
+/* ─── Progress bar ─── */
+.progress { height: 6px; background: var(--gray-100); border-radius: 9999px; overflow: hidden; }
+.progress-fill { height: 100%; background: var(--orange); border-radius: 9999px; transition: width 0.5s var(--ease-spring); }
+.progress-fill.danger { background: #EF4444; }
+
+/* ─── Code block ─── */
+.code-block {
+  background: #FDFCF8;
+  color: #1d1d1f;
+  border: 1px solid var(--gray-200);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+  font-size: 0.75rem;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  overflow-x: auto;
+  line-height: 1.6;
+}
+
+/* ─── Stat number ─── */
+.stat-number {
+  font-family: 'Epilogue', -apple-system, sans-serif;
+  font-size: clamp(2.5rem, 4vw, 3.5rem);
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  line-height: 1;
+  color: var(--black);
+}
+.stat-label {
+  font-size: 0.875rem;
+  color: var(--gray-400);
+  margin-top: 4px;
+}
+
+/* ─── Divider ─── */
+.divider { height: 1px; background: var(--gray-100); border: none; margin: 0; }
+
+/* ─── Responsive ─── */
+@media (max-width: 768px) {
+  .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; }
+  .section-pad { padding: 64px 20px; }
+  .pipeline-container { flex-wrap: wrap; gap: 12px; }
+  .pipeline-line { display: none; }
+}
+
+/* ══════════════════════════════════════════════════════════════
+   BACKWARD-COMPATIBLE ALIASES — used by other dashboard pages
+   ══════════════════════════════════════════════════════════════ */
+
+/* Card — border-driven look kept (it's what makes a dense dashboard scannable;
+   the landing page's borderless poster-card style doesn't survive a data grid),
+   but hover now overshoots slightly on lift instead of a flat opacity/shadow
+   fade, echoing the landing page's springy feel without its GSAP dependency. */
+.card { background: var(--white); border: 1px solid var(--gray-200); border-radius: var(--radius-lg); transition: box-shadow .25s var(--ease-spring), border-color .2s ease, transform .25s var(--ease-spring); }
+.card:hover { box-shadow: 0 4px 24px rgba(0,0,0,0.04); border-color: var(--gray-300); transform: translateY(-2px); }
+
+/* Stat card — the one hero surface per page, so it gets the landing page's
+   larger "framed panel" radius (--radius-2xl) instead of the standard --radius-lg
+   used by dense grid cards. */
+.stat-card { background: var(--white); border: 1px solid var(--gray-200); border-radius: var(--radius-2xl); padding: 20px 24px; transition: transform .25s var(--ease-spring); }
+.stat-card.orange { background: var(--orange); border-color: var(--orange); color: var(--white); }
+.stat-card:hover { transform: translateY(-2px); }
+
+/* Orange button (pill style) */
+.btn-orange {
+  background: var(--orange); color: var(--white); border-radius: 9999px;
+  padding: 8px 20px; font-size: 14px; font-weight: 600;
+  border: none; cursor: pointer; display: inline-flex; align-items: center; gap: 6px;
+  transition: background .15s ease, transform .3s var(--ease-spring);
+}
+.btn-orange:hover { background: var(--orange-dark); transform: translateY(-1px); }
+.btn-orange:active { transform: scale(0.97); }
+
+/* Data table */
+.data-table { width: 100%; border-collapse: separate; border-spacing: 0; }
+.data-table th {
+  text-align: left; font-size: 11px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .05em;
+  color: var(--gray-400); padding: 10px 16px;
+  background: var(--gray-50); border-bottom: 1px solid var(--gray-200);
+}
+.data-table td {
+  padding: 12px 16px; font-size: 13px; color: var(--black);
+  border-bottom: 1px solid var(--gray-100);
+}
+.data-table tr:last-child td { border-bottom: none; }
+.data-table tbody tr:hover td { background: var(--gray-50); }
+
+/* Pills (status badges) */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 3px 10px; border-radius: 9999px;
+  font-size: 12px; font-weight: 500;
+}
+.pill-green  { background: #f0fdf4; color: #16a34a; }
+.pill-red    { background: #fff1f2; color: #dc2626; }
+.pill-orange { background: var(--orange-light); color: var(--orange); }
+.pill-gray   { background: var(--gray-50); color: var(--gray-500); }
+.pill-dot    { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+/* Progress track */
+.progress-track { height: 6px; background: var(--gray-100); border-radius: 9999px; overflow: hidden; }
+
+/* Spin animation */
+@keyframes spin { to { transform: rotate(360deg); } }
+.animate-spin { animation: spin 1s linear infinite; }
+
+/* Gradient text (used by auth layout & login) */
+.gradient-text {
+  background: linear-gradient(135deg, var(--orange), var(--orange-dark));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Glass styles */
+.glass-card {
+  background: rgba(255,255,255,.8); backdrop-filter: blur(20px);
+  border: 1px solid rgba(0,0,0,.06);
+  box-shadow: 0 4px 24px rgba(0,0,0,.05); border-radius: 20px;
+}
+.glass-button {
+  background: rgba(255,255,255,.85); border: 1px solid rgba(0,0,0,.06);
+  border-radius: 14px; color: var(--black); backdrop-filter: blur(12px);
+  transition: all .2s ease;
+}
+.glass-button:hover { background: rgba(255,255,255,.95); }
+
+/* ─── Auth CTA button (login/signup) ───
+   Curved (16px), not a pill — a full 9999px radius on a wide full-width
+   button reads as a form control from a decade ago. The gradient + shine
+   sweep is what makes it look "designed" rather than a color swap on hover;
+   both are plain CSS, no JS style mutation needed on every mouse event. */
+.btn-auth {
+  position: relative;
+  overflow: hidden;
+  border-radius: 16px;
+  background: linear-gradient(145deg, #1c1712, var(--color-ink, #14100d));
+  box-shadow: 0 1px 2px rgba(0,0,0,0.08), 0 8px 20px -8px rgba(20,16,13,0.35);
+  transition: transform .35s var(--ease-spring), box-shadow .35s var(--ease-spring), background .3s ease;
+}
+.btn-auth:hover:not(:disabled) {
+  background: linear-gradient(145deg, #ff7a1a, var(--color-orange, #ff6b00));
+  transform: translateY(-2px);
+  box-shadow: 0 1px 2px rgba(0,0,0,0.08), 0 14px 28px -10px rgba(255,107,0,0.45);
+}
+.btn-auth:active:not(:disabled) { transform: translateY(0) scale(0.98); }
+.btn-auth:disabled { cursor: not-allowed; opacity: 0.6; }
+
+/* The shine: a soft diagonal highlight sweeping left-to-right on hover. */
+.btn-auth::before {
+  content: '';
+  position: absolute;
+  top: 0; left: -60%;
+  width: 40%; height: 100%;
+  background: linear-gradient(120deg, transparent, rgba(255,255,255,0.25), transparent);
+  transform: skewX(-20deg);
+  transition: left .6s ease;
+  pointer-events: none;
+}
+.btn-auth:hover:not(:disabled)::before { left: 130%; }
+
+/* Stagger */
+.stagger-children > * { opacity:0; animation: fadeInUp .4s ease-out forwards; }
+.stagger-children > *:nth-child(1) { animation-delay: .05s; }
+.stagger-children > *:nth-child(2) { animation-delay: .1s; }
+.stagger-children > *:nth-child(3) { animation-delay: .15s; }
+.stagger-children > *:nth-child(4) { animation-delay: .2s; }
+.stagger-children > *:nth-child(5) { animation-delay: .25s; }
+.stagger-children > *:nth-child(6) { animation-delay: .3s; }
+
+/* ══════════════════════════════════════════════════════════════
+   Landing page motion
+   ══════════════════════════════════════════════════════════════ */
+
+/* Beat entry in the pinned narrative */
+@keyframes beatIn {
+  from { opacity: 0; transform: translateY(18px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Scroll cue in the hero */
+@keyframes drop {
+  0%   { transform: translateY(-100%); }
+  100% { transform: translateY(200%); }
+}
+
+/* Hide the native cursor only once ours is actually mounted, so a failed
+   mount or a coarse pointer never leaves the page with no cursor at all. */
+.has-custom-cursor,
+.has-custom-cursor * {
+  cursor: none;
+}
+
+/* Lenis: the library sets these itself, but declaring them avoids a flash of
+   unstyled scrolling before its stylesheet applies. */
+html.lenis, html.lenis body { height: auto; }
+.lenis.lenis-smooth { scroll-behavior: auto !important; }
+.lenis.lenis-stopped { overflow: hidden; }
+
+/* The page sets its own smooth scrolling; the global rule fights Lenis. */
+html { scroll-behavior: auto; }
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  .has-custom-cursor, .has-custom-cursor * { cursor: auto; }
+}

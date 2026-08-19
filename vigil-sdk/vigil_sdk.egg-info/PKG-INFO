@@ -1,0 +1,71 @@
+Metadata-Version: 2.4
+Name: vigil-sdk
+Version: 0.1.0
+Summary: VIGIL: Autonomous Reliability Guardian for AI Agents. 1-line auto-instrumentation SDK.
+Author-email: SigNoz / VIGIL <hello@vigil.io>
+License: MIT
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Requires-Dist: opentelemetry-api
+Requires-Dist: opentelemetry-sdk
+Requires-Dist: opentelemetry-exporter-otlp
+Requires-Dist: openinference-instrumentation-openai
+Requires-Dist: openinference-instrumentation-langchain
+Requires-Dist: openinference-instrumentation-llamaindex
+Requires-Dist: openinference-instrumentation-crewai
+Requires-Dist: websocket-client
+Provides-Extra: test
+Requires-Dist: pytest; extra == "test"
+Requires-Dist: openai; extra == "test"
+Requires-Dist: langchain; extra == "test"
+Requires-Dist: crewai; extra == "test"
+Requires-Dist: llama-index; extra == "test"
+
+# VIGIL Python SDK
+
+The official 1-line auto-instrumentation SDK for VIGIL - the Autonomous Reliability Guardian for AI Agents.
+
+## Installation
+
+```bash
+pip install vigil-sdk
+```
+
+## Usage
+
+Simply call `vigil.init()` at the start of your application. The SDK will automatically detect and instrument your AI frameworks, capturing:
+- Tool calls
+- Prompts & Completions
+- Token usage & Latency
+- Trace ID, Session ID, User ID
+- Exceptions
+
+```python
+import vigil
+from openai import OpenAI
+
+# 1-line auto-instrumentation
+vigil.init(
+    project_name="customer-support-agent",
+    endpoint="http://localhost:4317",
+    budget_limit=10.0 # Circuit breaker limit per run
+)
+
+client = OpenAI()
+# The following call is automatically traced and sent to the VIGIL control plane
+response = client.chat.completions.create(
+    model="gpt-4",
+    messages=[{"role": "user", "content": "Hello!"}]
+)
+```
+
+## Supported Frameworks
+The VIGIL SDK seamlessly instruments:
+- OpenAI SDK
+- LangChain
+- LangGraph
+- LlamaIndex
+- CrewAI
+
+## Semantic Conventions
+We emit standard OpenTelemetry GenAI semantic conventions, allowing VIGIL to construct Agent DNA fingerprints and monitor cost firewalls in real-time.

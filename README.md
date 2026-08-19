@@ -271,6 +271,70 @@ That provides a deliberate tradeoff between:
 
 ---
 
+# HydraDB — Graph-Native Runtime Intelligence
+
+Featherless is the model layer, consulted when a decision is genuinely
+uncertain. HydraDB sits *before* it: a managed graph + memory store that
+auto-extracts entities and relationships from ingested text — no manual
+schema, no Cypher, no embeddings to manage — and answers natural-language
+questions with the actual graph paths behind the answer, not just retrieved
+text.
+
+Three collections, three questions the deterministic layer can't answer on
+its own:
+
+| Collection | Question asked | When |
+|---|---|---|
+| `enterprise` | "What policy applies to this call, and is it permitted?" | Declared intent is UNCERTAIN |
+| `code_graph` | "What's the transitive reverse-dependency closure and maintainer graph for this package? Is it a typosquat?" | Any install/exec-shaped call, unconditionally |
+| `agent_memory` | "Has this behavioral pattern been seen before? What's normal?" | A behavioral or cost signal has already been raised |
+
+**Featherless is the fallback, not the first move.** If the graph resolves
+the question — a real extracted relationship, not a vector-similarity
+guess — the decision is made without ever calling a model. Only when the
+graph itself has nothing does the call escalate to Featherless. Every
+decision this changes is logged with the literal `(entity)--[relation]-->
+(entity)` paths HydraDB traversed, in the `graph_paths` field, so the
+dashboard shows the graph's reasoning, not just its conclusion.
+
+### What we lose without HydraDB
+
+Every one of the checks above degrades gracefully to the pre-existing
+deterministic/Featherless pipeline if HydraDB is unconfigured or
+unreachable — that fallback path is what this whole product was already
+built on. What's lost specifically: an uncertain intent verdict fails
+closed to BLOCK instead of getting a graph-informed second opinion; an
+install command loses the typosquat/blast-radius check entirely, not a
+degraded version of it — that check doesn't run without a graph query, on
+purpose; and a behavioral anomaly is judged on this session's history
+alone, with no "has this actually happened before" cross-session context.
+
+### Verified live, not asserted
+
+Every claim above was exercised against the real HydraDB API, not assumed
+from documentation (which — verified the hard way — disagreed with itself
+across three different pages on method names before an empirical test
+against a real key settled it):
+
+- Real ingest → real async graph extraction → real query, round-tripped
+  end to end (`pkg/query-service/vigil/hydra/hydra_test.go`).
+- A firewall decision with **zero graph signal in the deterministic
+  layer** — a plain `pip install reqeusts` — got BLOCKed at the
+  `code_graph` stage from a real extracted `reqeusts --[is a typosquat
+  of]--> requests` relationship, before any model was reachable
+  (`firewall/hydra_integration_test.go`).
+- The `/ontology` page surfaced the seeded identity resolution
+  (`sam --[also known as]--> soham ratnaparkhi`), a contradictory
+  document pair, and both trust-scored sources — extracted automatically
+  from plain-English seed text, not hand-built graph structure.
+- **Honest number, not the target one:** HydraDB's `mode=thinking,
+  graph_context=true` query measured 150ms–2.5s per call in isolation,
+  up to ~4s under concurrent load in practice. That is the real number
+  the `/blast-radius` page reports; it is not sub-200ms, and this
+  document says so rather than rounding down.
+
+---
+
 # Core Runtime Architecture
 
 ```mermaid

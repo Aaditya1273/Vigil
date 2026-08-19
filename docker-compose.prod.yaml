@@ -1,3 +1,11 @@
+# NOTE: this file predates the actual vigil-server binary and root
+# Dockerfile — it references image tags nothing here builds, a Redis
+# dependency the server does not use (session/policy/cost state is
+# in-process), and a REACT_APP_* var that only means something to
+# Create React App, not this Next.js frontend. Left as-is except for the
+# HydraDB env vars below, which were the actual ask; treat the rest as
+# scaffolding to replace with `docker build -f Dockerfile .`, not a
+# working deployment config yet.
 version: "3.8"
 
 services:
@@ -13,6 +21,13 @@ services:
       - VIGIL_ENV=production
       - VIGIL_REDIS_URL=redis://vigil-redis:6379
       - VIGIL_LOG_LEVEL=info
+      # HydraDB graph layer — optional, same as VIGIL_FEATHERLESS_API_KEY.
+      # No separate sidecar/container: the client is pure Go (net/http
+      # against HydraDB's own managed API), not a process to run alongside
+      # this one. See pkg/query-service/vigil/hydra/hydra.go.
+      - VIGIL_HYDRADB_API_KEY=${VIGIL_HYDRADB_API_KEY:-}
+      - VIGIL_HYDRADB_DATABASE=${VIGIL_HYDRADB_DATABASE:-vigil-os}
+      - VIGIL_HYDRADB_BASE_URL=${VIGIL_HYDRADB_BASE_URL:-https://api.hydradb.com}
     depends_on:
       - vigil-redis
 

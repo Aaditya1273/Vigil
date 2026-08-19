@@ -142,14 +142,15 @@ func buildStack(logger *slog.Logger, budgetLimit float64) *stack {
 	}
 
 	fw := firewall.New(firewall.Deps{
-		Logger:     logger,
-		Policies:   policies,
-		Gov:        gov,
-		Heal:       heal,
-		Router:     router,
-		Ledger:     ledger,
-		Forecaster: fc,
-		Hydra:      hydraClient,
+		Logger:      logger,
+		Policies:    policies,
+		Gov:         gov,
+		Heal:        heal,
+		Router:      router,
+		Ledger:      ledger,
+		Forecaster:  fc,
+		Hydra:       hydraClient,
+		Compromised: firewall.NewCompromisedList(),
 	})
 
 	logger.InfoContext(ctx, "vigil: governance engine active",

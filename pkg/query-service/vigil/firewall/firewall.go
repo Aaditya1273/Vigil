@@ -82,6 +82,11 @@ type Result struct {
 	// the acceptance tests use this to prove HydraDB was on the request path,
 	// not merely configured.
 	GraphQueried bool `json:"graph_queried"`
+	// SupplyChain is populated only when a call was blocked by the
+	// compromised-package list (supply_chain.go) — the structured
+	// exposed-services/maintainer/typosquat report an incident responder
+	// actually needs, not just "blocked".
+	SupplyChain *SupplyChainReport `json:"supply_chain,omitempty"`
 }
 
 // Deps are the firewall's collaborators. All are optional except Policies:
@@ -100,6 +105,10 @@ type Deps struct {
 	// HydraDB credential still enforces intent, cost, and behavior; it just
 	// does so without the graph consult, same posture as Router being nil.
 	Hydra *hydra.Client
+	// Compromised is the incident-response denylist checked before the
+	// general typosquat heuristic. Nil (or empty) is the normal state — no
+	// active incident. See supply_chain.go.
+	Compromised *CompromisedList
 	// RecentSize bounds the in-memory decision ring served to the dashboard.
 	RecentSize int
 }
@@ -209,6 +218,23 @@ func (f *Firewall) Check(ctx context.Context, c Call) Result {
 
 	// --- 2. Blast radius, unconditional for install/exec-shaped calls --------
 	if pkg := blastRadiusTarget(c); pkg != "" {
+		// A package already on the incident-response denylist is blocked
+		// without waiting on the typosquat heuristic below — an operator who
+		// has confirmed a package is compromised already knows the answer,
+		// the graph query is for the exposure report, not the decision.
+		if blocked, report, name := f.checkSupplyChain(ctx, c); blocked {
+			res.Decision, res.Stage = Block, StageCodeGraph
+			res.SupplyChain = report
+			res.Reason = "package " + name + " is on the compromised-package list"
+			if report != nil {
+				res.GraphQueried = true
+				res.Reason += fmt.Sprintf(" — %d service(s) exposed, %d shared maintainer(s), %d typosquat(s) found in %.0fms",
+					len(report.ExposedServices), len(report.MaintainerShared), len(report.Typosquats), report.BlastRadiusTimeMS)
+			}
+			res.Message = "Vigil blocked this call: " + res.Reason
+			return f.finish(ctx, span, sess, res)
+		}
+
 		highRisk, gf := f.hydraBlastRadius(ctx, pkg)
 		if gf.resolved {
 			res.GraphQueried = true

@@ -1,20 +1,23 @@
 'use client'
 
 import { useState } from 'react'
-import { GitBranch, AlertTriangle, Search } from 'lucide-react'
+import { GitBranch, Users, Copy, AlertTriangle, Search } from 'lucide-react'
 import { EntityGraph, GraphContext } from '@/components/EntityGraph'
 
 interface BlastRadiusResult {
   package: string
-  entity_paths: string[]
-  graph_context: GraphContext
-  chunks: { source_title?: string }[]
-  query_time_ms: number
-  hydra_latency_ms: number
+  exposed_services: string[]
+  maintainer_shared: string[]
+  typosquats: string[]
+  dependency_graph: GraphContext
+  maintainer_graph: GraphContext
+  typosquat_graph: GraphContext
+  blast_radius_time_ms: number
 }
 
-// Seeded demo packages worth a click — real docs ingested by
-// `vigil-cli hydra-seed`, not fixtures.
+// Real npm packages worth a click — either seeded manually
+// (`vigil-cli hydra-seed`) or ingested for real by
+// `scripts/ingest_npm.py` (deps.dev + npm registry, no fixtures).
 const SUGGESTIONS = ['reqeusts', 'cross-env-2', 'express', 'lodash', 'left-pad']
 
 export default function BlastRadiusPage() {
@@ -40,24 +43,21 @@ export default function BlastRadiusPage() {
     }
   }
 
-  const flagged = result?.entity_paths.some((p) => p.toLowerCase().includes('typosquat'))
+  const flagged = (result?.typosquats.length ?? 0) > 0
 
   return (
     <div className="p-8 max-w-6xl mx-auto animate-fadeIn">
       <div className="mb-8">
         <h1 className="text-2xl font-bold text-gray-900">Blast Radius</h1>
         <p className="text-sm text-gray-500 mt-1">
-          Query HydraDB&apos;s code_graph collection for a package&apos;s transitive dependency
-          closure and maintainer graph — the same check <code className="font-mono text-xs bg-gray-100 px-1 rounded">pip install</code> /
-          <code className="font-mono text-xs bg-gray-100 px-1 rounded">npm install</code> runs through the firewall before it executes.
+          Three real HydraDB queries against code_graph — dependency exposure, maintainer overlap,
+          typosquat detection — the same checks <code className="font-mono text-xs bg-gray-100 px-1 rounded">pip install</code> /
+          <code className="font-mono text-xs bg-gray-100 px-1 rounded">npm install</code> run through the firewall before executing.
         </p>
       </div>
 
       <div className="card p-5 mb-6">
-        <form
-          onSubmit={(e) => { e.preventDefault(); run(pkg) }}
-          className="flex gap-2"
-        >
+        <form onSubmit={(e) => { e.preventDefault(); run(pkg) }} className="flex gap-2">
           <div className="relative flex-1">
             <Search className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
             <input
@@ -93,41 +93,69 @@ export default function BlastRadiusPage() {
 
       {result && (
         <>
-          <div className="grid grid-cols-3 gap-4 mb-6">
+          <div className="grid grid-cols-4 gap-4 mb-6">
             <div className={`stat-card ${flagged ? 'orange' : ''}`}>
               <p className="text-[11px] font-medium uppercase tracking-wider opacity-70">Verdict</p>
-              <p className="text-xl font-bold mt-1">{flagged ? 'Flagged — typosquat' : 'No findings'}</p>
+              <p className="text-xl font-bold mt-1">{flagged ? 'Flagged' : 'No findings'}</p>
             </div>
             <div className="stat-card">
-              <p className="text-[11px] text-gray-500 font-medium uppercase tracking-wider">Relationships found</p>
-              <p className="text-xl font-bold mt-1 text-gray-900">{result.entity_paths.length}</p>
+              <p className="text-[11px] text-gray-500 font-medium uppercase tracking-wider">Exposed services</p>
+              <p className="text-xl font-bold mt-1 text-gray-900">{result.exposed_services.length}</p>
             </div>
             <div className="stat-card">
-              <p className="text-[11px] text-gray-500 font-medium uppercase tracking-wider">Query time</p>
-              <p className="text-xl font-bold mt-1 text-gray-900">{result.query_time_ms}ms</p>
+              <p className="text-[11px] text-gray-500 font-medium uppercase tracking-wider">Shared maintainers</p>
+              <p className="text-xl font-bold mt-1 text-gray-900">{result.maintainer_shared.length}</p>
+            </div>
+            <div className="stat-card">
+              <p className="text-[11px] text-gray-500 font-medium uppercase tracking-wider">
+                Query time <span title="Real measured latency across all 3 queries, not a target number.">ⓘ</span>
+              </p>
+              <p className="text-xl font-bold mt-1 text-gray-900">{Math.round(result.blast_radius_time_ms)}ms</p>
             </div>
           </div>
 
-          <div className="card p-5 mb-6">
-            <div className="flex items-center gap-2 mb-4">
-              <GitBranch className="w-4 h-4 text-orange-600" />
-              <h2 className="text-sm font-semibold text-gray-800">Dependency &amp; maintainer graph</h2>
+          <div className="grid grid-cols-3 gap-4 mb-6">
+            <div className="card p-4">
+              <div className="flex items-center gap-2 mb-3">
+                <GitBranch className="w-4 h-4 text-orange-600" />
+                <h2 className="text-xs font-semibold text-gray-800">Dependency graph</h2>
+              </div>
+              <EntityGraph graphContext={result.dependency_graph} height={280} />
             </div>
-            <EntityGraph graphContext={result.graph_context} />
+            <div className="card p-4">
+              <div className="flex items-center gap-2 mb-3">
+                <Users className="w-4 h-4 text-orange-600" />
+                <h2 className="text-xs font-semibold text-gray-800">Maintainer graph</h2>
+              </div>
+              <EntityGraph graphContext={result.maintainer_graph} height={280} />
+            </div>
+            <div className="card p-4">
+              <div className="flex items-center gap-2 mb-3">
+                <Copy className="w-4 h-4 text-orange-600" />
+                <h2 className="text-xs font-semibold text-gray-800">Typosquat graph</h2>
+              </div>
+              <EntityGraph graphContext={result.typosquat_graph} height={280} />
+            </div>
           </div>
 
           <div className="card overflow-hidden">
             <div className="px-6 py-4 border-b border-gray-100">
-              <h2 className="text-sm font-semibold text-gray-800">Extracted relationships</h2>
+              <h2 className="text-sm font-semibold text-gray-800">Exposed services</h2>
             </div>
             <table className="data-table">
-              <thead><tr><th>Path</th></tr></thead>
+              <thead><tr><th>Service / package</th><th>Exposure</th></tr></thead>
               <tbody>
-                {result.entity_paths.map((p, i) => (
-                  <tr key={i}><td className="font-mono text-xs">{p}</td></tr>
+                {result.exposed_services.map((s, i) => (
+                  <tr key={i}><td className="font-mono text-xs">{s}</td><td><span className="pill pill-orange">transitively depends</span></td></tr>
                 ))}
-                {result.entity_paths.length === 0 && (
-                  <tr><td className="text-gray-400 text-sm py-8 text-center">No relationships extracted for this package.</td></tr>
+                {result.maintainer_shared.map((s, i) => (
+                  <tr key={`m${i}`}><td className="font-mono text-xs">{s}</td><td><span className="pill pill-gray">shares maintainer</span></td></tr>
+                ))}
+                {result.typosquats.map((s, i) => (
+                  <tr key={`t${i}`}><td className="font-mono text-xs">{s}</td><td><span className="pill pill-red">typosquat</span></td></tr>
+                ))}
+                {result.exposed_services.length + result.maintainer_shared.length + result.typosquats.length === 0 && (
+                  <tr><td colSpan={2} className="text-gray-400 text-sm py-8 text-center">No exposure found for this package.</td></tr>
                 )}
               </tbody>
             </table>

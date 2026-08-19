@@ -10,6 +10,7 @@ import (
 	"github.com/SigNoz/signoz/pkg/query-service/vigil"
 	"github.com/SigNoz/signoz/pkg/query-service/vigil/audit"
 	"github.com/SigNoz/signoz/pkg/query-service/vigil/firewall"
+	"github.com/SigNoz/signoz/pkg/query-service/vigil/hydra"
 	"github.com/SigNoz/signoz/pkg/query-service/vigil/mcp"
 	"github.com/SigNoz/signoz/pkg/query-service/vigil/policy"
 	"github.com/gorilla/mux"
@@ -223,22 +224,47 @@ func (st *stack) registerRoutes(api *mux.Router, mcpServer *mcp.MCPServer, budge
 			writeErr(w, http.StatusBadRequest, "query param 'package' is required")
 			return
 		}
-		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+		compromisedAt := r.URL.Query().Get("compromised_at")
+		if compromisedAt == "" {
+			compromisedAt = "the active incident window"
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
-		start := time.Now()
-		res, err := st.hydra.Query(ctx, "code_graph", "knowledge",
-			"What is the transitive reverse dependency closure and maintainer graph for "+pkg+"? Is it a typosquat of a popular package?")
+
+		// Three real, independent graph queries — dependency exposure,
+		// maintainer sharing, typosquat detection — not one merged query
+		// post-processed into three sections. The frontend renders each as
+		// its own graph because each really is a separate traversal.
+		dep, err := st.hydra.GetBlastRadius(ctx, pkg, compromisedAt)
 		if err != nil {
-			writeErr(w, http.StatusBadGateway, "hydra query failed: "+err.Error())
+			writeErr(w, http.StatusBadGateway, "dependency query failed: "+err.Error())
 			return
 		}
+		maint, err := st.hydra.GetMaintainerGraph(ctx, pkg)
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, "maintainer query failed: "+err.Error())
+			return
+		}
+		typo, err := st.hydra.GetTyposquats(ctx, pkg)
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, "typosquat query failed: "+err.Error())
+			return
+		}
+
+		br := hydra.BlastRadius{
+			Package: pkg, CompromisedAt: compromisedAt,
+			DependentPaths: dep.EntityPaths(), MaintainerPaths: maint.EntityPaths(), TyposquatPaths: typo.EntityPaths(),
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
-			"package":          pkg,
-			"entity_paths":     res.EntityPaths(),
-			"graph_context":    res.GraphContext,
-			"chunks":           res.Chunks,
-			"query_time_ms":    time.Since(start).Milliseconds(),
-			"hydra_latency_ms": res.LatencyMS,
+			"package":              pkg,
+			"exposed_services":     br.ExposedServices(),
+			"maintainer_shared":    br.SharedMaintainers(),
+			"typosquats":           br.Typosquats(),
+			"dependency_graph":     dep.GraphContext,
+			"maintainer_graph":     maint.GraphContext,
+			"typosquat_graph":      typo.GraphContext,
+			"entity_paths":         append(append(dep.EntityPaths(), maint.EntityPaths()...), typo.EntityPaths()...),
+			"blast_radius_time_ms": dep.LatencyMS + maint.LatencyMS + typo.LatencyMS,
 		})
 	}).Methods("GET", "OPTIONS")
 

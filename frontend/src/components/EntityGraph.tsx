@@ -1,6 +1,6 @@
 'use client'
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import dynamic from 'next/dynamic'
 
 // react-force-graph-2d touches `window` at module load (it wraps a canvas
@@ -76,6 +76,23 @@ export function EntityGraph({ graphContext, height = 420 }: { graphContext: Grap
   const data = useMemo(() => toGraphData(graphContext), [graphContext])
   const [hover, setHover] = useState<string | null>(null)
 
+  // ForceGraph2D has no way to auto-fill its parent — without an explicit
+  // width it measures the window/document instead, which is why this
+  // rendered as a canvas wider than the page the first time (a real bug
+  // caught by screenshotting it, not something visible in the code alone).
+  // A ResizeObserver on the wrapping div is what makes the canvas actually
+  // match its card, including when the card resizes (window resize, sidebar
+  // toggle, grid reflow).
+  const containerRef = useRef<HTMLDivElement>(null)
+  const [width, setWidth] = useState(0)
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const ro = new ResizeObserver(([entry]) => setWidth(entry.contentRect.width))
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
   if (data.nodes.length === 0) {
     return (
       <div style={{ height }} className="flex items-center justify-center text-sm text-gray-400 border border-dashed border-gray-200 rounded-xl">
@@ -85,9 +102,10 @@ export function EntityGraph({ graphContext, height = 420 }: { graphContext: Grap
   }
 
   return (
-    <div style={{ height }} className="relative border border-gray-100 rounded-xl overflow-hidden bg-[#fdfcfa]">
-      <ForceGraph2D
+    <div ref={containerRef} style={{ height }} className="relative border border-gray-100 rounded-xl overflow-hidden bg-[#fdfcfa]">
+      {width > 0 && <ForceGraph2D
         graphData={data}
+        width={width}
         height={height}
         nodeLabel={(n: any) => `${n.name}${n.type ? ` (${n.type})` : ''}`}
         nodeColor={(n: any) => TYPE_COLORS[n.type] || '#ff6b00'}
@@ -108,7 +126,7 @@ export function EntityGraph({ graphContext, height = 420 }: { graphContext: Grap
           ctx.textBaseline = 'top'
           ctx.fillText(label, node.x, node.y + 6 / scale)
         }}
-      />
+      />}
       {hover && (
         <div className="absolute top-2 left-2 text-xs font-medium bg-white/90 border border-gray-200 rounded-lg px-2 py-1 pointer-events-none">
           {hover}

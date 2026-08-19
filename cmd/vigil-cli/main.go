@@ -98,6 +98,7 @@ func main() {
 	replayCmd.Flags().StringVarP(&editFlag, "edit", "e", "", "Pass a new prompt string to execute")
 	rootCmd.AddCommand(replayCmd)
 	rootCmd.AddCommand(auditCmd())
+	rootCmd.AddCommand(hydraSeedCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)

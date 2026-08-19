@@ -465,6 +465,60 @@ func (c *Client) WaitIndexed(ctx context.Context, collection, sourceID string) e
 	}
 }
 
+// ListedSource is one document HydraDB has ingested.
+type ListedSource struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+}
+
+// List returns every ingested source in a collection.
+func (c *Client) List(ctx context.Context, collection string) ([]ListedSource, error) {
+	if c == nil {
+		return nil, fmt.Errorf("hydra: not configured")
+	}
+	body, _ := json.Marshal(map[string]string{"database": c.database, "collection": collection})
+	raw, status, err := c.do(ctx, http.MethodPost, "/context/list", bytes.NewReader(body), "application/json")
+	if err != nil {
+		return nil, fmt.Errorf("hydra: list: %w", err)
+	}
+	var data struct {
+		Sources []ListedSource `json:"sources"`
+	}
+	if err := decode(raw, status, &data); err != nil {
+		return nil, err
+	}
+	return data.Sources, nil
+}
+
+// Delete removes one ingested source (and its extracted graph data) from a
+// collection. Used by the seed script's --reset flag, and by operators who
+// want to clear a demo/test database without deleting the whole database.
+func (c *Client) Delete(ctx context.Context, collection, sourceID string) error {
+	if c == nil {
+		return fmt.Errorf("hydra: not configured")
+	}
+	body, _ := json.Marshal(map[string]any{
+		"database": c.database, "collection": collection, "ids": []string{sourceID},
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.baseURL+"/context", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("API-Version", "2")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("hydra: delete: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return err
+	}
+	return decode(raw, resp.StatusCode, nil)
+}
+
 // slug turns free text into a short, stable, URL/ID-safe source_id.
 func slug(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))

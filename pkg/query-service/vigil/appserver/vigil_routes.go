@@ -208,6 +208,89 @@ func (st *stack) registerRoutes(api *mux.Router, mcpServer *mcp.MCPServer, budge
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"events": events, "count": len(events)})
 	}).Methods("GET", "OPTIONS")
+
+	// --- HydraDB graph endpoints ----------------------------------------------
+	// All three ask the graph directly and return exactly what it said — no
+	// endpoint here can answer without a configured HydraDB client; a missing
+	// client is a 503, not a fallback to some non-graph answer.
+	api.HandleFunc("/blast-radius", func(w http.ResponseWriter, r *http.Request) {
+		if !st.hydra.Configured() {
+			writeErr(w, http.StatusServiceUnavailable, "HydraDB is not configured (VIGIL_HYDRADB_API_KEY unset)")
+			return
+		}
+		pkg := r.URL.Query().Get("package")
+		if pkg == "" {
+			writeErr(w, http.StatusBadRequest, "query param 'package' is required")
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+		defer cancel()
+		start := time.Now()
+		res, err := st.hydra.Query(ctx, "code_graph", "knowledge",
+			"What is the transitive reverse dependency closure and maintainer graph for "+pkg+"? Is it a typosquat of a popular package?")
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, "hydra query failed: "+err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"package":          pkg,
+			"entity_paths":     res.EntityPaths(),
+			"graph_context":    res.GraphContext,
+			"chunks":           res.Chunks,
+			"query_time_ms":    time.Since(start).Milliseconds(),
+			"hydra_latency_ms": res.LatencyMS,
+		})
+	}).Methods("GET", "OPTIONS")
+
+	api.HandleFunc("/ontology", func(w http.ResponseWriter, r *http.Request) {
+		if !st.hydra.Configured() {
+			writeErr(w, http.StatusServiceUnavailable, "HydraDB is not configured (VIGIL_HYDRADB_API_KEY unset)")
+			return
+		}
+		q := r.URL.Query().Get("entity")
+		if q == "" {
+			q = "List all canonical persons with their aliases, all contradictory documents, and all policies with the entity types they apply to"
+		} else {
+			q = "What do we know about " + q + ", including any aliases, contradictions, or applicable policy?"
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+		defer cancel()
+		res, err := st.hydra.Query(ctx, "enterprise", "knowledge", q)
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, "hydra query failed: "+err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"query":         q,
+			"entity_paths":  res.EntityPaths(),
+			"graph_context": res.GraphContext,
+			"chunks":        res.Chunks,
+		})
+	}).Methods("GET", "OPTIONS")
+
+	api.HandleFunc("/memory", func(w http.ResponseWriter, r *http.Request) {
+		if !st.hydra.Configured() {
+			writeErr(w, http.StatusServiceUnavailable, "HydraDB is not configured (VIGIL_HYDRADB_API_KEY unset)")
+			return
+		}
+		q := r.URL.Query().Get("question")
+		if q == "" {
+			q = "Show the timeline of facts recorded across sessions, including any fact that was later superseded"
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+		defer cancel()
+		res, err := st.hydra.Query(ctx, "agent_memory", "memory", q)
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, "hydra query failed: "+err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"question":      q,
+			"entity_paths":  res.EntityPaths(),
+			"graph_context": res.GraphContext,
+			"chunks":        res.Chunks,
+		})
+	}).Methods("GET", "OPTIONS")
 }
 
 // sessionBudget resolves a session's approved budget, falling back to the

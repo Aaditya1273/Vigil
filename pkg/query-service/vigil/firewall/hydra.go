@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/SigNoz/signoz/pkg/query-service/vigil/engine"
 	"github.com/SigNoz/signoz/pkg/query-service/vigil/hydra"
 )
 
@@ -106,7 +107,13 @@ func (f *Firewall) hydraIntentCheck(ctx context.Context, c Call) (verdict string
 	for _, cr := range res.GraphContext.ChunkRelations {
 		for _, t := range cr.Triplets {
 			pred := strings.ToLower(t.Relation.Predicate)
-			if strings.Contains(pred, "denied") || strings.Contains(pred, "forbid") || strings.Contains(pred, "block") {
+			// Real bug found via a live HydraDB query: the extracted
+			// canonical_predicate for a denial is literally "denies"
+			// (present tense) — not a substring of "denied", so this check
+			// silently never matched real graph output. Confirmed by
+			// dumping an actual triplet: "policy no-pii-exfil --[denies]-->
+			// customer personal data export".
+			if strings.Contains(pred, "deny") || strings.Contains(pred, "denies") || strings.Contains(pred, "denied") || strings.Contains(pred, "forbid") || strings.Contains(pred, "block") {
 				return "deny", finding
 			}
 			if strings.Contains(pred, "applies to") || strings.Contains(pred, "permit") || strings.Contains(pred, "allow") {
@@ -149,8 +156,19 @@ func (f *Firewall) hydraBlastRadius(ctx context.Context, pkg string) (highRisk b
 // already raised a signal. It does not decide on its own — it is context the
 // judge (or a human) uses to tell "this agent always does this" from
 // "this agent has never done this before".
-func (f *Firewall) hydraBehaviorCheck(ctx context.Context, c Call, signals []string) graphFinding {
-	q := fmt.Sprintf("Has the pattern %s been seen before for this agent? What is normal behavioral DNA?", strings.Join(signals, "+"))
+func (f *Firewall) hydraBehaviorCheck(ctx context.Context, c Call, signals []string, agentCtx *engine.AgentContext) graphFinding {
+	pattern := toolCallSummary(agentCtx)
+	if pattern == "" {
+		pattern = strings.Join(signals, "+")
+	}
+	// "Is this pattern anomalous... or does it match normal behavioral DNA"
+	// rather than "has this pattern been seen before" — found live that the
+	// weaker phrasing let generic decision-log noise (agent_memory holds
+	// every firewall decision ever logged, not just behavioral baselines)
+	// outrank an ingested behavioral-DNA baseline that literally uses the
+	// word "anomalous". Echoing the vocabulary a baseline statement would
+	// naturally use is what surfaced it reliably.
+	q := fmt.Sprintf("Is this pattern anomalous for this agent, or does it match normal behavioral DNA: %s?", pattern)
 	res, ok := f.hydraQuery(ctx, hydra.CollectionMemory, "memory", q)
 	finding := graphFinding{collection: hydra.CollectionMemory, query: q}
 	if !ok {
@@ -160,6 +178,34 @@ func (f *Firewall) hydraBehaviorCheck(ctx context.Context, c Call, signals []str
 	finding.latencyMS = res.LatencyMS
 	finding.resolved = res.HasGraphSignal()
 	return finding
+}
+
+// toolCallSummary turns the raw span ring into a compact "tool xN" pattern
+// description — e.g. "search_code x19, network_request x3" — the same shape
+// a human would describe an anomaly in, and concrete enough for agent_memory
+// to match against a previously-ingested behavioral-DNA baseline. Order is
+// preserved (first-seen tool first) so "read x1, search x1, test x1" reads
+// as a sequence, not just a bag of counts.
+func toolCallSummary(agentCtx *engine.AgentContext) string {
+	if agentCtx == nil {
+		return ""
+	}
+	counts := map[string]int{}
+	var order []string
+	for _, s := range agentCtx.Spans {
+		if s.Kind != "tool" {
+			continue
+		}
+		if counts[s.Name] == 0 {
+			order = append(order, s.Name)
+		}
+		counts[s.Name]++
+	}
+	parts := make([]string, 0, len(order))
+	for _, name := range order {
+		parts = append(parts, fmt.Sprintf("%s x%d", name, counts[name]))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // hydraLogMemory records this decision into agent_memory, fire-and-forget, so

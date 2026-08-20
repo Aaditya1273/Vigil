@@ -33,12 +33,13 @@ const (
 // Stage names which check produced the decision, so the dashboard can show
 // *why* rather than just *what*.
 const (
-	StageIntent    = "intent"
-	StageForecast  = "forecast"
-	StageBehavior  = "behavior"
-	StageCodeGraph = "code_graph"
-	StageJudge     = "judge"
-	StageDefault   = "default"
+	StageIntent       = "intent"
+	StageForecast     = "forecast"
+	StageBehavior     = "behavior"
+	StageCodeGraph    = "code_graph"
+	StageEntityPolicy = "entity_policy"
+	StageJudge        = "judge"
+	StageDefault      = "default"
 )
 
 // Call is one tool call awaiting a decision.
@@ -87,6 +88,11 @@ type Result struct {
 	// exposed-services/maintainer/typosquat report an incident responder
 	// actually needs, not just "blocked".
 	SupplyChain *SupplyChainReport `json:"supply_chain,omitempty"`
+	// EntityPolicy is populated when a file-sharing-shaped call named a
+	// recipient the enterprise graph resolved to a protected entity type
+	// (entity_policy.go) — the alias-merge chain that explains the block,
+	// whether or not it fired.
+	EntityPolicy *EntityPolicyReport `json:"entity_policy,omitempty"`
 }
 
 // Deps are the firewall's collaborators. All are optional except Policies:
@@ -248,6 +254,28 @@ func (f *Firewall) Check(ctx context.Context, c Call) Result {
 		}
 	}
 
+	// --- 2b. Entity policy, unconditional for share-shaped calls -------------
+	// A call that names a recipient ("share the export with Sam") is
+	// resolved through the enterprise graph before it proceeds: who is
+	// this, does the name merge to a protected entity type, does policy
+	// deny sharing with them. This is the entity-resolution problem made
+	// operational — "Sam" alone tells the deterministic policy layer
+	// nothing, but the graph already knows Sam is Soham Ratnaparkhi is
+	// S. Ratnaparkhi, and separately knows Jordan Blake resolves to a
+	// Customer a policy denies sharing with.
+	if entBlocked, entReport := f.checkEntityPolicy(ctx, c); entReport != nil {
+		res.GraphQueried = true
+		res.GraphPaths = append(res.GraphPaths, entReport.PolicyPaths...)
+		if entBlocked {
+			res.Decision, res.Stage = Block, StageEntityPolicy
+			res.EntityPolicy = entReport
+			res.Reason = fmt.Sprintf("%s resolves to entity type %s, denied by policy — aliases: %s",
+				entReport.Name, entReport.EntityType, strings.Join(entReport.ResolvedAliases, ", "))
+			res.Message = "Vigil blocked this call: " + res.Reason
+			return f.finish(ctx, span, sess, res)
+		}
+	}
+
 	// --- 3. Cost forecast ----------------------------------------------------
 	// Forecast the charge this call *would* incur, not the one already spent —
 	// the point is to intervene before the budget is gone.
@@ -277,8 +305,11 @@ func (f *Firewall) Check(ctx context.Context, c Call) Result {
 	}
 
 	// --- 4. Behavioral plugins, checked against agent_memory when raised -----
+	// Computed unconditionally (not just when Gov is set) since
+	// hydraBehaviorCheck below needs the real tool-call sequence to ask
+	// agent_memory a concrete question, not just the abstract signal names.
+	agentCtx := sess.AgentContext(c.Budget, c.Tool)
 	if f.deps.Gov != nil {
-		agentCtx := sess.AgentContext(c.Budget, c.Tool)
 		for _, v := range f.deps.Gov.EvaluateContext(ctx, agentCtx) {
 			signals = append(signals, v.RuleName)
 			switch v.Severity {
@@ -313,7 +344,7 @@ func (f *Firewall) Check(ctx context.Context, c Call) Result {
 	// Not run when nothing raised scrutiny — the whole point is to reserve the
 	// graph call for calls that are already in question.
 	if len(signals) > 0 {
-		gf := f.hydraBehaviorCheck(ctx, c, signals)
+		gf := f.hydraBehaviorCheck(ctx, c, signals, agentCtx)
 		if gf.resolved {
 			res.GraphQueried = true
 			res.GraphPaths = append(res.GraphPaths, gf.paths...)

@@ -294,6 +294,43 @@ func (st *stack) registerRoutes(api *mux.Router, mcpServer *mcp.MCPServer, budge
 		})
 	}).Methods("GET", "OPTIONS")
 
+	// /ontology/entity is the structured single-entity detail view: canonical
+	// name, resolved aliases, entity type/policy, contradictory docs, and
+	// trust scores — the same GetEntityProfile queries the firewall's
+	// entity-policy stage runs, reused here so the dashboard shows exactly
+	// what the firewall sees.
+	api.HandleFunc("/ontology/entity", func(w http.ResponseWriter, r *http.Request) {
+		if !st.hydra.Configured() {
+			writeErr(w, http.StatusServiceUnavailable, "HydraDB is not configured (VIGIL_HYDRADB_API_KEY unset)")
+			return
+		}
+		name := r.URL.Query().Get("name")
+		if name == "" {
+			writeErr(w, http.StatusBadRequest, "query param 'name' is required")
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+		profile, err := st.hydra.GetEntityProfile(ctx, name)
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, "hydra query failed: "+err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"name":                   name,
+			"aliases":                profile.Aliases(),
+			"alias_paths":            profile.AliasPaths,
+			"alias_contexts":         profile.AliasContexts,
+			"policy_paths":           profile.PolicyPaths,
+			"policy_contexts":        profile.PolicyContexts,
+			"contradiction_paths":    profile.ContradictionPaths,
+			"contradiction_contexts": profile.ContradictionContexts,
+			"trust_paths":            profile.TrustPaths,
+			"trust_contexts":         profile.TrustContexts,
+			"query_time_ms":          profile.QueryTimeMS,
+		})
+	}).Methods("GET", "OPTIONS")
+
 	api.HandleFunc("/memory", func(w http.ResponseWriter, r *http.Request) {
 		if !st.hydra.Configured() {
 			writeErr(w, http.StatusServiceUnavailable, "HydraDB is not configured (VIGIL_HYDRADB_API_KEY unset)")
@@ -315,6 +352,44 @@ func (st *stack) registerRoutes(api *mux.Router, mcpServer *mcp.MCPServer, budge
 			"entity_paths":  res.EntityPaths(),
 			"graph_context": res.GraphContext,
 			"chunks":        res.Chunks,
+		})
+	}).Methods("GET", "OPTIONS")
+
+	// /memory/fact is the structured temporal view of one fact: its current
+	// value and its change history, via the same GetTemporalFact queries
+	// the abstention layer runs — reused here so the timeline shows exactly
+	// what a firewall consult would see.
+	api.HandleFunc("/memory/fact", func(w http.ResponseWriter, r *http.Request) {
+		if !st.hydra.Configured() {
+			writeErr(w, http.StatusServiceUnavailable, "HydraDB is not configured (VIGIL_HYDRADB_API_KEY unset)")
+			return
+		}
+		subject := r.URL.Query().Get("subject")
+		if subject == "" {
+			writeErr(w, http.StatusBadRequest, "query param 'subject' is required")
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		defer cancel()
+		tf, err := st.hydra.GetTemporalFact(ctx, subject)
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, "hydra query failed: "+err.Error())
+			return
+		}
+		answer := ""
+		if tf.Abstain {
+			answer = "NOT_IN_HISTORY"
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"subject":          tf.Subject,
+			"has_signal":       tf.HasSignal(),
+			"abstain":          tf.Abstain,
+			"answer":           answer,
+			"current_paths":    tf.CurrentPaths,
+			"current_contexts": tf.CurrentContexts,
+			"history_paths":    tf.HistoryPaths,
+			"history_contexts": tf.HistoryContexts,
+			"query_time_ms":    tf.QueryTimeMS,
 		})
 	}).Methods("GET", "OPTIONS")
 }

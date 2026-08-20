@@ -360,6 +360,62 @@ func (r QueryResult) EntityPaths() []string {
 	return out
 }
 
+// Contexts returns the deduplicated source sentences behind every triplet —
+// the actual extracted-from text, which is where a fact like a confidence
+// score or corroborating source lives; the triplet itself only carries the
+// canonical (source, predicate, target), not free-form detail.
+func (r QueryResult) Contexts() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, cr := range r.GraphContext.ChunkRelations {
+		for _, t := range cr.Triplets {
+			if c := t.Relation.Context; c != "" && !seen[c] {
+				seen[c] = true
+				out = append(out, c)
+			}
+		}
+	}
+	return out
+}
+
+// ChunkTexts returns the raw source text of the retrieved chunks — a
+// fallback for when a source document doesn't triplet-ize cleanly but its
+// raw text still answers the question. Confirmed live: a resolver's
+// FACT_UPDATE sentence (long, with parenthetical asides) ranked as the #1
+// retrieved chunk for a directly matching query, but never appeared in
+// GraphContext's extracted triplets/contexts for that same query — the
+// retrieval layer found it, the triplet extractor didn't summarize it into
+// the ranked context list. Contexts()/EntityPaths() alone would have
+// silently dropped it.
+//
+// chunk_content's shape differs by ingest type, found live: a "knowledge"
+// source (IngestKnowledge) comes back JSON-wrapped as
+// {"content":{"text":"..."}, ...}, but a "memory" source (IngestMemory,
+// what agent_memory holds) comes back as the raw text directly, no JSON at
+// all — unmarshaling that as JSON silently fails and produces an empty
+// string, which is why this first tries the wrapped shape and falls back
+// to the raw string as-is.
+func (r QueryResult) ChunkTexts() []string {
+	var out []string
+	for _, c := range r.Chunks {
+		raw, ok := c["chunk_content"].(string)
+		if !ok || raw == "" {
+			continue
+		}
+		var doc struct {
+			Content struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		}
+		if json.Unmarshal([]byte(raw), &doc) == nil && doc.Content.Text != "" {
+			out = append(out, doc.Content.Text)
+		} else {
+			out = append(out, raw)
+		}
+	}
+	return out
+}
+
 // HasGraphSignal reports whether the query actually traversed any
 // relationships, as opposed to returning bare text matches. The firewall
 // uses this to decide whether HydraDB gave it something to reason about.
@@ -370,6 +426,83 @@ func (r QueryResult) HasGraphSignal() bool {
 		}
 	}
 	return false
+}
+
+// abstainStopwords are skipped when pulling keywords out of a question —
+// common enough that their presence in retrieved content proves nothing
+// about whether the actual subject was found.
+var abstainStopwords = map[string]bool{
+	"what": true, "when": true, "where": true, "which": true, "who": true,
+	"does": true, "have": true, "this": true, "that": true, "with": true,
+	"from": true, "about": true, "there": true, "been": true, "seen": true,
+	"before": true, "current": true, "value": true, "history": true,
+}
+
+func significantWords(s string) []string {
+	var out []string
+	for _, w := range strings.Fields(s) {
+		w = strings.Trim(w, ".,?!\"'();:")
+		if len(w) >= 4 && !abstainStopwords[strings.ToLower(w)] {
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
+// Abstains reports whether an answer to subject should be withheld as
+// NOT_IN_HISTORY rather than risk presenting a hallucinated answer.
+//
+// Two signals were tried; only one holds up. The task's original design —
+// "graph_context empty OR confidence < 0.7" — was tested directly against a
+// completely fabricated subject ("Zorblaxian the space wizard from planet
+// Neptune-9") that has never been ingested anywhere: HydraDB still returned
+// 10 chunks scored 0.87-0.90 and 15 graph triplets, indistinguishable by
+// score or emptiness from a real, answerable query (confirmed live against
+// agent_memory). Both halves of the task's proposed check would have
+// answered anyway. This is the same "relevancy_score is a rank-order
+// signal, not an absolute gate" finding from Track 01's abstention
+// self-check (scripts/ingest_enterprise.py), now confirmed on a second,
+// independent collection.
+//
+// What actually discriminates: whether the subject's own keywords appear
+// anywhere in what was retrieved. A fabricated subject's name never
+// appears in real content, however confidently the ranker scored its best
+// (irrelevant) guesses.
+func (r QueryResult) Abstains(subject string) bool {
+	if !r.HasGraphSignal() && len(r.Chunks) == 0 {
+		return true
+	}
+	keywords := significantWords(subject)
+	if len(keywords) == 0 {
+		return false
+	}
+	var haystack strings.Builder
+	for _, c := range r.Contexts() {
+		haystack.WriteString(c)
+		haystack.WriteByte(' ')
+	}
+	for _, p := range r.EntityPaths() {
+		haystack.WriteString(p)
+		haystack.WriteByte(' ')
+	}
+	if chunkJSON, err := json.Marshal(r.Chunks); err == nil {
+		haystack.Write(chunkJSON)
+	}
+	lower := strings.ToLower(haystack.String())
+	hits := 0
+	for _, kw := range keywords {
+		if strings.Contains(lower, strings.ToLower(kw)) {
+			hits++
+		}
+	}
+	// A single matching keyword is not enough for a multi-word subject —
+	// found live: "bedroom wall paint color" (a genuinely unasked-about
+	// subject) matched "paint" and "colors" purely by coincidence, against
+	// an unrelated real session about flower-painting technique, and a
+	// single-keyword gate called that a hit. Requiring a majority is what
+	// actually distinguishes "this subject was discussed" from "one common
+	// word in it happens to appear somewhere else."
+	return hits*2 <= len(keywords)
 }
 
 // Query asks a natural-language question against one collection, in "fast"
@@ -522,6 +655,219 @@ func (c *Client) GetFullBlastRadius(ctx context.Context, pkg, compromisedAt stri
 
 	br.QueryTimeMS = float64(time.Since(start).Microseconds()) / 1000
 	return br, nil
+}
+
+// EntityProfile is what the graph knows about one named entity: its
+// resolved aliases (with confidence and provenance — how the resolver
+// decided two names were the same person, not just that it did), any
+// documents that contradict each other about them, and the trust-scored
+// sources those documents came from.
+type EntityProfile struct {
+	Name                  string
+	AliasPaths            []string
+	AliasContexts         []string
+	PolicyPaths           []string
+	PolicyContexts        []string
+	ContradictionPaths    []string
+	ContradictionContexts []string
+	TrustPaths            []string
+	TrustContexts         []string
+	QueryTimeMS           float64
+}
+
+// Aliases returns the merged-alias names this entity resolved to, parsed
+// from the real SAME_AS relationships HydraDB extracted from the resolver's
+// own output (see scripts/ingest_enterprise.py). Matches both phrasings
+// HydraDB's real extraction produces for an identity relationship — "also
+// known as" is what it actually emits for alias-type input text; "same
+// person" is kept as a fallback in case the extraction normalizes
+// differently for other phrasings.
+//
+// Real bug found by querying the live graph: an alias-shaped question about
+// one person retrieves every structurally-similar identity chunk in the
+// collection, not just that person's — so a naive "grab every 'also known
+// as' triplet in the result" pulled in other people's aliases too (e.g.
+// asking about Sam also returned "hana --[also known as]--> hana s.").
+// Each triplet's subject or object must actually name this entity before
+// its counterpart is treated as one of its aliases.
+func (e EntityProfile) Aliases() []string {
+	lname := strings.ToLower(e.Name)
+	seen := map[string]bool{}
+	var out []string
+	for _, needle := range []string{"also known as", "same person"} {
+		for _, p := range e.AliasPaths {
+			if !strings.Contains(p, needle) {
+				continue
+			}
+			srcEnd := strings.Index(p, " --[")
+			tgtStart := strings.Index(p, "--> ")
+			if srcEnd <= 0 || tgtStart < 0 {
+				continue
+			}
+			source, target := p[:srcEnd], p[tgtStart+4:]
+			var alias string
+			switch {
+			case sameEntity(source, lname):
+				alias = target
+			case sameEntity(target, lname):
+				alias = source
+			default:
+				continue // neither side is the entity we asked about
+			}
+			if !seen[alias] {
+				seen[alias] = true
+				out = append(out, alias)
+			}
+		}
+	}
+	return out
+}
+
+// sameEntity is a loose case-insensitive match between a graph node name and
+// the entity name a caller asked about — either can be a substring of the
+// other ("sam" vs "sam ratnaparkhi" style mismatches), since HydraDB
+// extracts entity names as free-form text, not against a fixed vocabulary.
+func sameEntity(node, lowerQueried string) bool {
+	lnode := strings.ToLower(node)
+	return strings.Contains(lnode, lowerQueried) || strings.Contains(lowerQueried, lnode)
+}
+
+// GetEntityProfile answers "who is this person" — their resolved aliases,
+// any contradictory records about them, and the policy question this
+// exists for: whether they resolve to a protected entity type (e.g.
+// Customer) that a data-sharing policy denies.
+func (c *Client) GetEntityProfile(ctx context.Context, name string) (EntityProfile, error) {
+	start := time.Now()
+	ep := EntityProfile{Name: name}
+
+	// Split into two focused queries rather than one compound one. A real,
+	// empirically observed retrieval failure: asking about aliases and
+	// policy in the same question let the policy-shaped triplets outrank
+	// the identity ones in HydraDB's ranked retrieval, so AliasPaths came
+	// back with zero "also known as" edges even though they exist in the
+	// graph — confirmed by asking the identical alias-only question in
+	// isolation, which reliably surfaces them. Each question now asks for
+	// exactly one kind of thing.
+	aliases, err := c.Query(ctx, CollectionEnterprise, "knowledge",
+		"Who is "+name+"? List every alias or name that is the same person as "+name+".")
+	if err != nil {
+		return ep, fmt.Errorf("aliases: %w", err)
+	}
+	ep.AliasPaths = aliases.EntityPaths()
+	ep.AliasContexts = aliases.Contexts()
+
+	// Same crowding problem, same fix: "what type is this person, and what
+	// does policy say about that type" in one question let the (much more
+	// numerous) generic policy-application documents outrank the one
+	// triplet that actually names this person's type — confirmed live: a
+	// person-only question reliably surfaces "jordan blake --[customer
+	// of]--> northwind signal", the compound one never did. Two clean
+	// questions, results merged into one field since checkEntityPolicy
+	// scans PolicyPaths for both signals together.
+	etype, err := c.Query(ctx, CollectionEnterprise, "knowledge",
+		name+" — what entity type are they: Employee, Customer, or Vendor?")
+	if err != nil {
+		return ep, fmt.Errorf("entity type: %w", err)
+	}
+	polrule, err := c.Query(ctx, CollectionEnterprise, "knowledge",
+		"What policy applies to Customer data, and does it deny sharing that data outside the organization?")
+	if err != nil {
+		return ep, fmt.Errorf("policy: %w", err)
+	}
+	ep.PolicyPaths = append(etype.EntityPaths(), polrule.EntityPaths()...)
+	ep.PolicyContexts = append(etype.Contexts(), polrule.Contexts()...)
+
+	contra, err := c.Query(ctx, CollectionEnterprise, "knowledge",
+		"Are there any contradictory documents or records about "+name+"?")
+	if err != nil {
+		return ep, fmt.Errorf("contradictions: %w", err)
+	}
+	ep.ContradictionPaths = contra.EntityPaths()
+	ep.ContradictionContexts = contra.Contexts()
+
+	trust, err := c.Query(ctx, CollectionEnterprise, "knowledge",
+		"What are the trust scores of the sources that mention "+name+"?")
+	if err != nil {
+		return ep, fmt.Errorf("trust: %w", err)
+	}
+	ep.TrustPaths = trust.EntityPaths()
+	ep.TrustContexts = trust.Contexts()
+
+	ep.QueryTimeMS = float64(time.Since(start).Microseconds()) / 1000
+	return ep, nil
+}
+
+// GetContradictions lists contradictory document pairs across the whole
+// enterprise graph, not scoped to one entity — the ontology page's
+// "contradictions detected" view.
+func (c *Client) GetContradictions(ctx context.Context) (QueryResult, error) {
+	return c.Query(ctx, CollectionEnterprise, "knowledge", "List all documents that contradict each other and what they disagree about.")
+}
+
+// TemporalFact is what the agent_memory graph knows about one fact's value
+// over time: what it is now, and the history behind that — when it changed,
+// and (if a resolver emitted a FACT_UPDATE statement for it, see
+// scripts/ingest_memory.py) what it was superseded from.
+type TemporalFact struct {
+	Subject         string
+	CurrentPaths    []string
+	CurrentContexts []string
+	HistoryPaths    []string
+	HistoryContexts []string
+	// Abstain is true when the current-value query found nothing that
+	// actually mentions Subject — see QueryResult.Abstains. A caller
+	// should answer NOT_IN_HISTORY rather than present CurrentPaths/
+	// CurrentContexts, which may be HydraDB's best (irrelevant) guess.
+	Abstain     bool
+	QueryTimeMS float64
+}
+
+// HasSignal reports whether the graph had anything at all to say about this
+// subject — the first half of the abstention check: a query with zero graph
+// signal has nothing to hallucinate an answer from.
+func (t TemporalFact) HasSignal() bool {
+	return len(t.CurrentPaths) > 0 || len(t.CurrentContexts) > 0
+}
+
+// GetTemporalFact answers "what is X now, and what was its history" as two
+// separate questions, not one compound one — the same crowding fix as
+// GetEntityProfile: a single "what is X and what's its history" question
+// let history-shaped text outrank the current-value triplet in testing.
+func (c *Client) GetTemporalFact(ctx context.Context, subject string) (TemporalFact, error) {
+	start := time.Now()
+	tf := TemporalFact{Subject: subject}
+
+	cur, err := c.Query(ctx, CollectionMemory, "memory",
+		"What is the current, most up-to-date value for: "+subject+"?")
+	if err != nil {
+		return tf, fmt.Errorf("current value: %w", err)
+	}
+	tf.CurrentPaths = cur.EntityPaths()
+	tf.CurrentContexts = cur.Contexts()
+	tf.Abstain = cur.Abstains(subject)
+
+	hist, err := c.Query(ctx, CollectionMemory, "memory",
+		"What is the history of "+subject+"? Was any earlier value superseded, and in which session and when?")
+	if err != nil {
+		return tf, fmt.Errorf("history: %w", err)
+	}
+	tf.HistoryPaths = hist.EntityPaths()
+	tf.HistoryContexts = hist.Contexts()
+	// Fall back to raw chunk text for anything the triplet extractor didn't
+	// summarize into a graph context — see ChunkTexts.
+	seen := map[string]bool{}
+	for _, c := range tf.HistoryContexts {
+		seen[c] = true
+	}
+	for _, c := range hist.ChunkTexts() {
+		if !seen[c] {
+			seen[c] = true
+			tf.HistoryContexts = append(tf.HistoryContexts, c)
+		}
+	}
+
+	tf.QueryTimeMS = float64(time.Since(start).Microseconds()) / 1000
+	return tf, nil
 }
 
 // SourceStatus is one ingested document's indexing progress.

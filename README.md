@@ -269,6 +269,50 @@ That provides a deliberate tradeoff between:
 
 **security · latency · inference cost · reasoning quality**
 
+### Three real shipped vendors, not one
+
+Featherless is the hackathon's compute partner and stays first in priority,
+but the product cannot go deterministic-only for however long a Featherless
+credential takes to arrive. NVIDIA and Gemini ship as real, live vendors too
+(`pkg/query-service/vigil/llm/chain.go`) — not test-only stand-ins, that role
+belongs to Groq alone (`llm/live_test.go`, never in the vendor table).
+`Chain.Complete` tries each configured vendor in priority order and retires
+one only once it actually refuses (expired credit, revoked key), so today —
+with NVIDIA and Gemini credentials configured and no Featherless key yet —
+the chain runs `nvidia→gemini`, confirmed live via the real startup probe:
+
+```
+INFO vigil: inference configured provider=nvidia→gemini roles="[FAST_RISK_CLASSIFIER POLICY_REASONER DEEP_SECURITY_REVIEWER]"
+INFO llm: vendor reachable vendor=nvidia latency=434ms
+INFO llm: vendor reachable vendor=gemini latency=1.114s
+```
+
+Adding a Featherless key later slots it back in as the preferred vendor with
+no code change — `TestLiveChainFromEnv` (`llm/live_test.go`) exercises the
+exact `ChainFromEnv` constructor the server uses, not a hand-built config, so
+this is proof of the real code path, not a simulated one.
+
+**Real findings from configuring each vendor, verified with raw `curl`
+before picking any model ID:**
+
+- **NVIDIA's `/v1/models` catalog lists models this account cannot actually
+  invoke.** `nemotron-4-340b-instruct` and `nemotron-ultra-253b` both 404'd
+  with `"Function ... Not found for account"` despite being listed. Every
+  model ID actually shipped (`meta/llama-3.1-8b-instruct`,
+  `nvidia/llama-3.3-nemotron-super-49b-v1`,
+  `nvidia/nemotron-3-ultra-550b-a55b`) was individually confirmed with a
+  real completion, not picked from the catalog on trust.
+- **Gemini's free-tier key blocks `-pro` models outright**, not just
+  rate-limits them — a `-pro` request returns `429 RESOURCE_EXHAUSTED` with
+  an explicitly stated free-tier limit of **0** requests/day.
+- **Plain Gemini `-flash` models (3.5, 3.6) spend hidden "thinking" tokens
+  before any visible content** — a `max_tokens=50` request came back with
+  empty content and `finish_reason=length`, the tokens spent entirely on an
+  invisible reasoning pass. `-flash-lite` has neither problem, confirmed
+  with both a tiny ping and a structured JSON judge-shaped request, which is
+  why it's used for all three roles on this key rather than a bigger model
+  that would fail and silently fall back on every call.
+
 ---
 
 # HydraDB — Graph-Native Runtime Intelligence
@@ -286,6 +330,7 @@ its own:
 | Collection | Question asked | When |
 |---|---|---|
 | `enterprise` | "What policy applies to this call, and is it permitted?" | Declared intent is UNCERTAIN |
+| `enterprise` | "Who does this share/send recipient resolve to — through whatever aliases the resolver merged — and does policy deny sharing with that entity type?" | Any share/send-shaped call, unconditionally |
 | `code_graph` | "What's the transitive reverse-dependency closure and maintainer graph for this package? Is it a typosquat?" | Any install/exec-shaped call, unconditionally |
 | `agent_memory` | "Has this behavioral pattern been seen before? What's normal?" | A behavioral or cost signal has already been raised |
 
@@ -339,6 +384,192 @@ against a real key settled it):
   the graph-context-enriched structural queries this integration relies
   on for blast radius. Different question, different cost; reporting
   both rather than letting one stand in for the other.
+
+---
+
+## Entity resolution and ontology (Track 01)
+
+`scripts/ingest_enterprise.py` simulates a 500-document, 9-source enterprise
+corpus (Slack, Gmail, Linear, Drive, HubSpot, Fireflies, GitHub, Jira,
+Confluence) for a fictional company, "Northwind Signal" — the same
+fictional-company pattern EnterpriseRAG-Bench uses for exactly this reason:
+real enterprise exports aren't available, and simulated data must be labeled
+as such, not passed off as real. A 3-stage resolver (deterministic email
+match → heuristic name similarity → optional LLM-assist) proposes SAME_AS
+merges with confidence and provenance, ingested as plain English for HydraDB
+to extract as real graph edges — the graph is never hand-built.
+
+**Real numbers from an actual run** (`--docs 500 --seed 42`, deterministic —
+not the spec's example 127/23/15):
+
+- 500 documents ingested across 9 sources, 66 contradiction pairs planted
+- 35 distinct name variants found, **54 alias pairs resolved** — 35
+  deterministic (email match), 19 heuristic (name similarity), 0 llm-assist
+  needed (heuristic confidence was sufficient for every remaining pair on
+  this corpus)
+- **15/15 correct abstentions** on questions about invented names that never
+  appear anywhere in the corpus (measured by literal name-absence in
+  retrieved chunk content — see the bug below on why relevancy_score can't
+  be used for this)
+- Live firewall proof, not a stub: "share the export with Jordan" **BLOCKs**
+  (Jordan Blake resolves to the corpus's one Customer contact), "share the
+  export with Sam" **ALLOWs** (Sam resolves to Soham Ratnaparkhi, an
+  Employee) — `firewall/entity_policy_live_test.go`, gated on a real
+  `VIGIL_HYDRADB_API_KEY` the same way `llm/live_test.go` gates on a real
+  model key
+
+### Real bugs found by testing against the live graph, not a stub
+
+A stub test proves the mechanism works against data shaped the way you
+expect it to be shaped. These only surfaced by ingesting real text and
+reading back what HydraDB actually extracted from it:
+
+- **Compound questions lose to the ranker.** Asking "what are this person's
+  aliases, and what entity type/policy applies to them" in one query let
+  the (far more numerous) generic policy documents outrank the one
+  alias-identity triplet in HydraDB's retrieval — `AliasPaths` came back
+  empty even though the SAME_AS edge existed in the graph. Confirmed by
+  asking the identical alias-only question in isolation, which reliably
+  surfaced it. Fixed by splitting every compound profile question
+  (`GetEntityProfile`, `hydra.go`) into single-purpose questions.
+- **Alias-shaped queries retrieve everyone's aliases, not just the one
+  asked about.** A naive "grab every 'also known as' triplet in the result"
+  pulled in other people's SAME_AS edges too, since every identity
+  statement in the corpus is structurally similar text. Fixed by requiring
+  a triplet's subject or object to actually name the queried entity before
+  its counterpart counts as one of its aliases (`EntityProfile.Aliases()`).
+- **`entity_type` was dead metadata.** The resolver's cast list tagged one
+  person as a Customer, but nothing ever turned that into ingested text —
+  the graph had generic "policy applies to entity type Customer" documents
+  but no fact linking any specific person to being one, so every name
+  queried got flagged identically. Fixed by ingesting one explicit
+  `"{name} is a {type} of {company}"` statement per person.
+- **"denies" is not a substring of "denied."** HydraDB's real extracted
+  predicate for a policy denial is the present-tense `"denies"`
+  (`policy no-pii-exfil --[denies]--> customer personal data export`); the
+  deny-keyword check — in both the new entity-policy stage and the
+  already-shipped `hydraIntentCheck` — was checking for `"denied"` and
+  `"forbid"`, silently never matching real graph output. This one caused an
+  actual false ALLOW in the live test before being caught and fixed.
+- **`relevancy_score` is a rank-order signal, not an absolute relevance
+  gate.** A query about a name that appears nowhere in the corpus still
+  comes back with chunks scored 0.75–0.85 — HydraDB returns its best
+  available matches ranked against each other, always. Correct abstention
+  detection checks whether the invented name appears anywhere in the
+  retrieved chunk content, not the score attached to it.
+
+---
+
+## Memory and context retrieval (Track 03)
+
+`scripts/ingest_memory.py` ingests real conversation sessions from
+[LongMemEval](https://github.com/xiaowu0162/LongMemEval) (ICLR 2025) —
+specifically the community-maintained
+[`longmemeval-cleaned`](https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned)
+oracle split, which keeps only the sessions relevant to each of 500 real
+questions and drops the padding "haystack" sessions the full benchmark adds
+to reach ~115k tokens/question. That's a disclosed scope reduction, not the
+full benchmark: ingesting the full haystack for even one question means
+hundreds of sessions of filler conversation with no bearing on any answer.
+~35-40 real sessions are sampled across all six of the benchmark's real
+question types (single-session-user/assistant/preference, knowledge-update,
+temporal-reasoning, multi-session), each ingested into `agent_memory` as
+`source_id=<session_id>` with its real date. A disjoint set of sessions is
+deliberately held out — never ingested — so abstention can be tested against
+questions whose answer genuinely is not in the graph, not just "wasn't
+retrieved well."
+
+For knowledge-update questions, a second resolver pass emits one plain-
+English `FACT_UPDATE` sentence naming both the earlier and later session,
+both dates, and both values — the same "the graph is extracted from text,
+never hand-built" discipline as Track 01's SAME_AS statements. The prior
+value is a heuristic guess (the benchmark records only the current answer,
+not its full history) and is labeled as a guess in the emitted text itself.
+
+`hydra.GetTemporalFact` answers "what is X now" and "what changed" as two
+separate questions against `agent_memory` (`pkg/query-service/vigil/hydra/hydra.go`),
+exposed at `/api/v1/memory/fact?subject=X` and rendered on `/memory-timeline`
+as a GitHub-blame-style fact history, with an explicit `NOT_IN_HISTORY`
+abstention state shown in the UI, not silently omitted.
+
+### Real bugs and findings from testing against the live graph
+
+- **HydraDB's real ingest limit is token-based, not byte-based.** A real
+  session (quote- and newline-heavy, ~19k characters) got a 413; the actual
+  error was `"memory_tokens payload too large: request cost 3900 exceeds
+  the per-request per_sec limit of 1000."` Bisected with synthetic payloads
+  of known byte size to find this — plain repeated characters up to 30KB
+  ingested fine, because they tokenize far more cheaply than natural
+  English. Fixed by chunking each session to ~3200 characters (safely under
+  1000 tokens even for dense text) rather than ingesting one blob per
+  session.
+- **The rate limit is tokens/sec, not requests/sec.** A fixed `--rps 2.0`
+  pace still triggered 429s once per-chunk token cost varied — 112 of 240
+  chunks failed on the first real run. Fixed with retry-with-backoff on 429
+  and a slower default pace, not just a lower request count.
+- **The task's proposed abstention check — "`graph_context` empty OR
+  confidence < 0.7" — does not discriminate, tested directly.** A query
+  about a fabricated subject ("Zorblaxian the space wizard from planet
+  Neptune-9", never ingested anywhere) still returned 10 chunks scored
+  0.87–0.90 and 15 real graph triplets — neither half of the proposed check
+  would have triggered. The same finding as Track 01's abstention
+  self-check, now confirmed independently on `agent_memory`. What actually
+  discriminates: whether the subject's own keywords appear anywhere in the
+  retrieved content (`hydra.QueryResult.Abstains`) — a fabricated subject's
+  name never appears in real content, however confidently the ranker
+  scored its best (irrelevant) guesses.
+- **Behavioral-pattern queries lose to decision-log noise on a shared
+  collection.** `agent_memory` also holds every firewall decision this
+  product has ever logged (`hydraLogMemory`), so a literal "has this
+  pattern been seen before" query about a freshly-ingested anomalous-DNA
+  baseline got crowded out by generic historical "search_code is permitted
+  by declared intent" log lines. Fixed by rephrasing the query to echo the
+  baseline's own vocabulary ("is this pattern **anomalous**...") rather
+  than a neutral "has this been seen" — confirmed live, and it also fixed
+  `hydraBehaviorCheck`'s query to describe the real accumulated tool-call
+  sequence (`search_code x19, network_request x3`) instead of just the
+  abstract signal names that triggered it.
+- **`chunk_content`'s shape depends on ingest type, and one code path
+  assumed only one of them.** A `knowledge`-type source's `chunk_content`
+  comes back JSON-wrapped (`{"content":{"text":"..."}}`); a `memory`-type
+  source's comes back as the raw text directly, no JSON at all. A retrieved
+  FACT_UPDATE chunk ranked #1 for its own matching query but produced
+  nothing from `hydra.QueryResult.ChunkTexts()`, because that method only
+  handled the wrapped shape and silently dropped the unwrapped one. Fixed
+  to try the wrapped shape first and fall back to the raw string.
+- **A single matching keyword is not enough to call a multi-word subject
+  "found."** `Abstains` first only required one keyword hit; a query for
+  "bedroom wall paint color" (never ingested) matched "paint" and "colors"
+  purely by coincidence against an unrelated real session about flower-
+  painting technique, and answered instead of abstaining. Fixed to require
+  a majority of the subject's keywords, not just one.
+
+Real evaluation numbers from `scripts/eval_memory.py`, run against the
+real ingested data — retrieval recall (does the fact's own answer terms
+actually surface in what HydraDB returned for the real question), not a
+full LLM-graded QA pipeline, and explicitly not the spec's example numbers:
+
+| Category | Recall | n (skipped) |
+|---|---|---|
+| single-session-user | 100.00% | 4 (0) |
+| single-session-assistant | 100.00% | 4 (0) |
+| single-session-preference | 100.00% | 4 (0) |
+| knowledge-update | 100.00% | 2 (2) |
+| temporal-reasoning | 100.00% | 4 (0) |
+| multi-session | 50.00% | 2 (2) |
+| **Overall** | **95.00%** | **20 scored** |
+
+**Abstention accuracy: 56.25% (9/16)** on held-out questions whose sessions
+were never ingested. Reported as measured, not adjusted toward the spec's
+example 95% — a keyword-majority heuristic genuinely does not reach that on
+real, diverse natural-language questions; some held-out questions share
+enough real vocabulary with unrelated ingested content (the same class of
+false-negative the fix above addresses, on a smaller scale than that one
+fix could fully close) that the graph answers instead of abstaining. This
+is the honest number the current heuristic gets, not the number the spec
+asked for. "Skipped" questions are ones whose answer had no keyword ≥4
+characters to check against (mostly bare-number answers, e.g. a count) —
+excluded from scoring rather than silently miscounted.
 
 ---
 

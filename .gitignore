@@ -29,3 +29,8 @@ __pycache__/
 # Local runtime artifacts: the audit ledger is written by every demo run.
 vigil-audit.jsonl
 *-audit.jsonl
+
+# scripts/ingest_memory.py auto-downloads the 15MB LongMemEval oracle
+# dataset here on first run, and regenerates the sampling manifest every
+# run — neither belongs in git.
+scripts/data/

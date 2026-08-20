@@ -14,12 +14,11 @@ import (
 
 // Config describes how to reach one OpenAI-compatible inference vendor.
 //
-// Featherless is the one vendor this product ships against. The client is
-// still generic — any endpoint speaking the same /chat/completions contract
-// works, which is what makes it possible to test this exact code path
-// against a free-tier stand-in (see llm_test.go, live_test.go) before a
-// Featherless credential exists — but adding a second vendor to the shipped
-// product is a deliberate product decision, not just a table entry.
+// Featherless, NVIDIA, and Gemini all ship real support in the chain (see
+// vendors in chain.go); the client is generic — any endpoint speaking the
+// same /chat/completions contract works — which is also what makes it
+// possible to test this exact code path against a free-tier stand-in (see
+// llm_test.go, live_test.go) without spending a shipped vendor's credit.
 type Config struct {
 	// Name identifies the vendor in logs, telemetry, and the dashboard. It is
 	// also what appears in the audit record, so it must be the vendor that

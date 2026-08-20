@@ -12,12 +12,11 @@ import (
 // TestLiveVendors exercises the OpenAI-compatible client against real
 // endpoints.
 //
-// Featherless is the shipped product vendor (models: moonshotai/Kimi-K3,
-// zai-org/GLM-5.2). Groq is not a product vendor — it is kept here, and only
-// here, as a free-tier stand-in: proving this client against any real
-// OpenAI-compatible endpoint is proof the identical code path works against
-// Featherless once a key exists, since both speak the same wire format. It
-// must never appear in the vendor table in chain.go.
+// Featherless, NVIDIA, and Gemini are shipped product vendors (see vendors
+// in chain.go). Groq is not — it is kept here, and only here, as a
+// free-tier stand-in for testing the client itself without spending a
+// shipped vendor's credit. It must never appear in the vendor table in
+// chain.go.
 //
 // Skipped unless a key is present, so the default `go test ./...` stays
 // offline and credential-free.
@@ -27,6 +26,8 @@ func TestLiveVendors(t *testing.T) {
 	cfgs := []llm.Config{}
 	for _, v := range []struct{ name, env, base, model string }{
 		{"featherless", "VIGIL_FEATHERLESS_API_KEY", "https://api.featherless.ai/v1", "moonshotai/Kimi-K3"},
+		{"nvidia", "VIGIL_NVIDIA_API_KEY", "https://integrate.api.nvidia.com/v1", "meta/llama-3.1-8b-instruct"},
+		{"gemini", "VIGIL_GEMINI_API_KEY", "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-3.5-flash-lite"},
 		{"groq_test_standin", "VIGIL_GROQ_API_KEY", "https://api.groq.com/openai/v1", "openai/gpt-oss-20b"},
 	} {
 		key := os.Getenv(v.env)
@@ -86,4 +87,46 @@ func TestLiveVendors(t *testing.T) {
 				resp.PromptTokens, resp.CompletionTokens, resp.Text)
 		})
 	}
+}
+
+// TestLiveChainFromEnv exercises the actual production code path —
+// ChainFromEnv, the same constructor appserver wires up — rather than a
+// hand-built Config, so this proves what the running server would actually
+// do: read whichever vendors have a key in the environment, in vendor-table
+// order, and serve a real completion from the first one that can. With no
+// Featherless key configured but real NVIDIA and Gemini keys present, this
+// is the live proof that the product keeps working without waiting on
+// Featherless — the chain just runs NVIDIA → Gemini instead.
+//
+// Skipped unless at least one shipped vendor's key is present.
+//
+//	go test -run TestLiveChainFromEnv -v ./pkg/query-service/vigil/llm/
+func TestLiveChainFromEnv(t *testing.T) {
+	if os.Getenv("VIGIL_FEATHERLESS_API_KEY") == "" &&
+		os.Getenv("VIGIL_NVIDIA_API_KEY") == "" &&
+		os.Getenv("VIGIL_GEMINI_API_KEY") == "" {
+		t.Skip("no shipped-vendor credentials in the environment")
+	}
+
+	chain := llm.ChainFromEnv(newTestLogger(t))
+	if chain == nil {
+		t.Fatal("ChainFromEnv returned nil despite a shipped-vendor key being present — check VIGIL_<VENDOR>_MODEL_FAST is also set")
+	}
+	t.Logf("chain order: %s", chain.Name())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	resp, err := chain.Complete(ctx, llm.Request{
+		Role:        llm.RoleFast,
+		User:        "Reply with exactly one word: OK",
+		MaxTokens:   50,
+		Temperature: 0,
+	})
+	if err != nil {
+		t.Fatalf("chain.Complete failed across every configured vendor: %v", err)
+	}
+	if resp.Text == "" {
+		t.Error("empty completion from the chain")
+	}
+	t.Logf("served by model=%s latency=%s text=%q", resp.ModelID, resp.Latency.Round(time.Millisecond), resp.Text)
 }

@@ -21,12 +21,19 @@ var ErrExhausted = errors.New("llm: provider exhausted")
 
 // Vendors, in the order the chain tries them.
 //
-// Featherless is the only shipped vendor: it is the hackathon's compute
-// partner and the one this product is built against. The table stays a table
-// (not a single hardcoded client) because the underlying client is generic —
-// any OpenAI-compatible endpoint slots in by adding one row — but the
-// product's vendor list is deliberately Featherless alone, not a fallback
-// chain of convenience providers.
+// Featherless is the hackathon's compute partner and stays first in the
+// order for that reason — but the product cannot afford to go
+// deterministic-only for however long a Featherless credential takes to
+// arrive, so NVIDIA and Gemini are shipped as real, live vendors too, not
+// test-only stand-ins (that role was Groq's, kept separate — see
+// live_test.go). Each is independently configured from its own env vars;
+// configsFromEnv skips whichever ones have no key set, so today, with only
+// NVIDIA and Gemini credentials configured, the chain is effectively
+// NVIDIA → Gemini, and adding a Featherless key later slots it back in as
+// the preferred vendor with no code change. This is failover across
+// *vendors*, layered under the existing per-vendor role failover
+// (Reviewer → Reasoner → Fast) in openai_compatible.go — cheapest-first
+// within a vendor, most-preferred-vendor-first across vendors.
 type vendor struct {
 	name       string
 	envPrefix  string // VIGIL_<prefix>_API_KEY, and per-role model overrides
@@ -36,6 +43,8 @@ type vendor struct {
 
 var vendors = []vendor{
 	{"featherless", "FEATHERLESS", "https://api.featherless.ai/v1", "https://featherless.ai/models"},
+	{"nvidia", "NVIDIA", "https://integrate.api.nvidia.com/v1", "https://build.nvidia.com/models"},
+	{"gemini", "GEMINI", "https://generativelanguage.googleapis.com/v1beta/openai", "https://ai.google.dev/gemini-api/docs/models"},
 }
 
 // quotaPhrases are the bodies vendors return when credit is gone rather than

@@ -1,10 +1,13 @@
 {
   "framework": "nextjs",
+  "rootDirectory": "frontend",
   "buildCommand": "npm run build",
   "installCommand": "npm install",
   "outputDirectory": ".next",
   "env": {
     "VIGIL_BACKEND_URL": "https://vigil-server.onrender.com",
+    "NEXT_PUBLIC_VIGIL_BACKEND_URL": "https://vigil-server.onrender.com",
     "NEXT_PUBLIC_VIGIL_WS_URL": "wss://vigil-server.onrender.com/api/v1/vigil/ws"
   }
 }
+

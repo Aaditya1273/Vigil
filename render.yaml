@@ -38,7 +38,38 @@ services:
         sync: false
 
       # ── Budget & safety ───────────────────────────────────────────────────────
+      # ── NVIDIA NIM inference ──────────────────────────────────────────────────
+      - key: VIGIL_NVIDIA_API_KEY
+        sync: false
+      - key: VIGIL_NVIDIA_MODEL_FAST
+        value: "meta/llama-3.1-8b-instruct"
+      - key: VIGIL_NVIDIA_MODEL_REASONER
+        value: "nvidia/llama-3.3-nemotron-super-49b-v1"
+      - key: VIGIL_NVIDIA_MODEL_REVIEWER
+        value: "nvidia/nemotron-3-ultra-550b-a55b"
+
+      # ── Gemini (fallback) ─────────────────────────────────────────────────────
+      - key: VIGIL_GEMINI_API_KEY
+        sync: false
+      - key: VIGIL_GEMINI_MODEL_FAST
+        value: "gemini-3.5-flash-lite"
+      - key: VIGIL_GEMINI_MODEL_REASONER
+        value: "gemini-3.5-flash-lite"
+      - key: VIGIL_GEMINI_MODEL_REVIEWER
+        value: "gemini-3.5-flash-lite"
+
+      # ── HydraDB (graph intelligence) ─────────────────────────────────────────
+      - key: VIGIL_HYDRADB_API_KEY
+        sync: false
+      - key: VIGIL_HYDRADB_DATABASE
+        value: "vigil-os"
+
+      # ── Budget & safety ───────────────────────────────────────────────────────
       - key: VIGIL_BUDGET_LIMIT
         value: "100"
       - key: VIGIL_ALLOW_EXEC
         value: "false"
+
+      # ── Audit log ────────────────────────────────────────────────────────────
+      - key: VIGIL_AUDIT_PATH
+        value: "./vigil-audit.jsonl"

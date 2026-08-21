@@ -6,7 +6,7 @@ import type { NextConfig } from "next";
 const BACKEND =
   process.env.VIGIL_BACKEND_URL ||
   process.env.ARGUS_BACKEND_URL ||
-  "https://argus-xhgx.onrender.com";
+  "https://vigil-hydra.onrender.com";
 
 const nextConfig: NextConfig = {
   images: {

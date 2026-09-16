@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <em>Observe. Reason. Enforce.</em>
+  <em>Observe. Reason. Enforce...</em>
 </p>
 
 <p align="center">
